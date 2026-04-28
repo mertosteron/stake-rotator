@@ -91,12 +91,13 @@ export async function rankRotations(args: RankRotationsArgs): Promise<Rotation[]
       swapCostBps,
       dailyUpliftSol,
       paybackDays,
-      recommended: paybackDays > 0 && paybackDays <= paybackDaysMax && apyUplift > 0,
+      recommended: apyUplift > 0 && paybackDays <= paybackDaysMax,
     });
   }
 
   return rotations.sort((a, b) => {
     if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
+    if (a.recommended) return b.dailyUpliftSol - a.dailyUpliftSol;
     return a.paybackDays - b.paybackDays;
   });
 }
