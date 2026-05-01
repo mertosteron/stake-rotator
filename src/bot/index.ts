@@ -12,7 +12,8 @@ async function main() {
   bot.catch((err) => {
     const ctx = err.ctx;
     console.error(`error in update ${ctx.update.update_id}:`, err.error);
-    if (err.error instanceof GrammyError) console.error("grammy:", err.error.description);
+    if (err.error instanceof GrammyError)
+      console.error("grammy:", err.error.description);
     else if (err.error instanceof HttpError) console.error("http:", err.error);
   });
 
@@ -21,16 +22,27 @@ async function main() {
   if (host) {
     actionsServer = startActionsServer(env.actionsPort());
   } else {
-    console.log("BOT_PUBLIC_HOST not set — /rotate will return base64 tx instead of solana-action URL");
+    console.log(
+      "BOT_PUBLIC_HOST not set — /rotate will return base64 tx instead of solana-action URL",
+    );
   }
 
   await bot.api.setMyCommands([
     { command: "start", description: "register and show help" },
     { command: "bind_wallet", description: "link a Solana wallet pubkey" },
     { command: "status", description: "show bound wallet and LST holdings" },
+    {
+      command: "init_vault",
+      description: "create your on-chain rotation vault",
+    },
+    { command: "deposit", description: "deposit LST into your vault" },
+    { command: "withdraw", description: "withdraw LST from your vault" },
     { command: "recommend", description: "show best rotation candidate" },
     { command: "rotate", description: "build the rotation transaction" },
-    { command: "revoke", description: "kill-switch: revoke bot rotation authority" },
+    {
+      command: "revoke",
+      description: "kill-switch: revoke bot rotation authority",
+    },
   ]);
 
   const shutdown = async (signal: string) => {

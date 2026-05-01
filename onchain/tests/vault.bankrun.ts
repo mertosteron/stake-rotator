@@ -152,13 +152,18 @@ function main() {
     destMint,
     vaultDestAta,
     feeDestination,
-    1_050_000_000n,
+    new PublicKey("sp1V4h2gWorkGhVcazBc22Hfo2f5sd7jcjT4EDPrWFF"),
     250,
+    [{ pubkey: jupiterReadonly, isSigner: false, isWritable: false }],
   );
   assertDisc(claim.data, "claim_performance_fee");
-  assertU64(claim.data, 8, 1_050_000_000n);
-  assertU16(claim.data, 16, 250);
+  assertU16(claim.data, 8, 250);
   assert.equal(claim.keys[5]?.pubkey.toBase58(), TOKEN_PROGRAM_ID.toBase58());
+  assert.equal(
+    claim.keys[6]?.pubkey.toBase58(),
+    "sp1V4h2gWorkGhVcazBc22Hfo2f5sd7jcjT4EDPrWFF",
+  );
+  assert.equal(claim.keys[7]?.pubkey.toBase58(), jupiterReadonly.toBase58());
 
   console.log("vault client smoke tests passed");
 }

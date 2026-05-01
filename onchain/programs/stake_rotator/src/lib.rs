@@ -8,22 +8,112 @@
 //   arbitrary Jupiter v6 swap instruction via invoke_signed with the vault PDA as
 //   the swap signer. Security relies on (a) the Jupiter program ID being pinned,
 //   (b) the bot's `min_out_amount` slippage check, (c) the owner's revoke option.
-// - `claim_performance_fee` accepts current_sol_value_per_lst from the bot. A
-//   production version should read this from Sanctum's on-chain pool state. The
-//   `perf_fee_bps_max` cap on Vault limits worst-case fee draw.
+// - `claim_performance_fee` prices the current LST through Sanctum's on-chain
+//   SOL Value Calculator interface; the bot cannot supply a price.
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{instruction::Instruction, program::invoke_signed};
+use anchor_lang::solana_program::{
+    instruction::Instruction,
+    program::{get_return_data, invoke, invoke_signed},
+};
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("5ra9y6YL7dqWWHGvVDQsuj4HND3DeLaea38jHEMvGoaS");
 
 const VAULT_SEED: &[u8] = b"vault";
-const LAMPORTS_PER_SOL_U128: u128 = 1_000_000_000;
+const SOL_VALUE_CALCULATOR_RETURN_LEN: usize = 16;
 
 // Jupiter v6 aggregator program ID.
 pub const JUPITER_V6_PROGRAM_ID: Pubkey =
     anchor_lang::solana_program::pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+
+// Sanctum SOL Value Calculator programs.
+pub const SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
+    anchor_lang::solana_program::pubkey!("sp1V4h2gWorkGhVcazBc22Hfo2f5sd7jcjT4EDPrWFF");
+pub const SANCTUM_SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
+    anchor_lang::solana_program::pubkey!("sspUE1vrh7xRoXxGsg7vR1zde2WdGtJRbyK9uRumBDy");
+pub const SANCTUM_SPL_MULTI_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
+    anchor_lang::solana_program::pubkey!("ssmbu3KZxgonUtjEMCKspZzxvUQCxAFnyh1rcHUeEDo");
+pub const MARINADE_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
+    anchor_lang::solana_program::pubkey!("mare3SCyfZkAndpBRBeonETmkCCB3TJTTrz8ZN2dnhP");
+pub const LIDO_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
+    anchor_lang::solana_program::pubkey!("1idUSy4MGGKyKhvjSnGZ6Zc7Q4eKQcibym4BkEEw9KR");
+pub const WSOL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
+    anchor_lang::solana_program::pubkey!("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE");
+
+fn is_allowed_sol_value_calculator(program_id: Pubkey) -> bool {
+    matches!(
+        program_id,
+        SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID
+            | SANCTUM_SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID
+            | SANCTUM_SPL_MULTI_SOL_VALUE_CALCULATOR_PROGRAM_ID
+            | MARINADE_SOL_VALUE_CALCULATOR_PROGRAM_ID
+            | LIDO_SOL_VALUE_CALCULATOR_PROGRAM_ID
+            | WSOL_SOL_VALUE_CALCULATOR_PROGRAM_ID
+    )
+}
+
+fn read_sol_value_calculator_return(calculator_program: Pubkey) -> Result<(u64, u64)> {
+    let (program_id, data) = get_return_data().ok_or(ErrorCode::InvalidOracleValue)?;
+    require_keys_eq!(program_id, calculator_program, ErrorCode::InvalidOracleValue);
+    require!(
+        data.len() == SOL_VALUE_CALCULATOR_RETURN_LEN,
+        ErrorCode::InvalidOracleValue
+    );
+    let min = u64::from_le_bytes(
+        data[0..8]
+            .try_into()
+            .map_err(|_| ErrorCode::InvalidOracleValue)?,
+    );
+    let max = u64::from_le_bytes(
+        data[8..16]
+            .try_into()
+            .map_err(|_| ErrorCode::InvalidOracleValue)?,
+    );
+    require!(min <= max, ErrorCode::InvalidOracleValue);
+    Ok((min, max))
+}
+
+fn invoke_sol_value_calculator<'info>(
+    calculator_program: &UncheckedAccount<'info>,
+    lst_mint: &Account<'info, Mint>,
+    remaining_accounts: &[AccountInfo<'info>],
+    discriminant: u8,
+    amount: u64,
+) -> Result<(u64, u64)> {
+    let calculator_key = calculator_program.key();
+    require!(
+        is_allowed_sol_value_calculator(calculator_key),
+        ErrorCode::InvalidOracleProgram
+    );
+
+    let mut data = Vec::with_capacity(9);
+    data.push(discriminant);
+    data.extend_from_slice(&amount.to_le_bytes());
+
+    let mut metas = Vec::with_capacity(1 + remaining_accounts.len());
+    metas.push(AccountMeta::new_readonly(lst_mint.key(), false));
+    for acc in remaining_accounts.iter() {
+        metas.push(if acc.is_writable {
+            AccountMeta::new(*acc.key, acc.is_signer)
+        } else {
+            AccountMeta::new_readonly(*acc.key, acc.is_signer)
+        });
+    }
+
+    let ix = Instruction {
+        program_id: calculator_key,
+        accounts: metas,
+        data,
+    };
+
+    let mut infos = Vec::with_capacity(2 + remaining_accounts.len());
+    infos.push(lst_mint.to_account_info());
+    infos.extend(remaining_accounts.iter().cloned());
+    infos.push(calculator_program.to_account_info());
+    invoke(&ix, &infos)?;
+    read_sol_value_calculator_return(calculator_key)
+}
 
 #[program]
 pub mod stake_rotator {
@@ -180,12 +270,8 @@ pub mod stake_rotator {
 
     /// Compute uplift over high-water-mark in SOL terms and transfer fee_bps of it
     /// from the vault token account to fee_destination, in current LST units.
-    /// `current_sol_value_per_lst` is in lamports per 1 LST (scaled by 1e9 native).
-    pub fn claim_performance_fee(
-        ctx: Context<ClaimPerfFee>,
-        current_sol_value_per_lst: u64,
-        fee_bps: u16,
-    ) -> Result<()> {
+    /// Valuation is performed through Sanctum's on-chain SOL Value Calculator CPI.
+    pub fn claim_performance_fee(ctx: Context<ClaimPerfFee>, fee_bps: u16) -> Result<()> {
         let v = &ctx.accounts.vault;
         require!(
             v.rotation_authority != Pubkey::default(),
@@ -202,27 +288,37 @@ pub mod stake_rotator {
             ctx.accounts.current_lst_mint.key(),
             ErrorCode::WrongMint
         );
-        require!(current_sol_value_per_lst > 0, ErrorCode::InvalidOracleValue);
 
         let lst_balance = ctx.accounts.vault_token_account.amount;
-        let nav_lamports: u64 = ((lst_balance as u128)
-            .checked_mul(current_sol_value_per_lst as u128)
-            .ok_or(ErrorCode::SwapMathOverflow)?
-            / LAMPORTS_PER_SOL_U128) as u64;
+        let (nav_min_lamports, _nav_max_lamports) = invoke_sol_value_calculator(
+            &ctx.accounts.sol_value_calculator_program,
+            &ctx.accounts.current_lst_mint,
+            ctx.remaining_accounts,
+            0,
+            lst_balance,
+        )?;
 
-        if nav_lamports <= v.high_water_mark_lamports {
+        if nav_min_lamports <= v.high_water_mark_lamports {
             return Ok(());
         }
-        let uplift = nav_lamports - v.high_water_mark_lamports;
+        let uplift = nav_min_lamports - v.high_water_mark_lamports;
         let fee_lamports = (uplift as u128)
             .checked_mul(fee_bps as u128)
             .ok_or(ErrorCode::SwapMathOverflow)?
             / 10_000u128;
-        let fee_lst_units: u64 = (fee_lamports
-            .checked_mul(LAMPORTS_PER_SOL_U128)
-            .ok_or(ErrorCode::SwapMathOverflow)?
-            / current_sol_value_per_lst as u128) as u64;
-        if fee_lst_units == 0 {
+        let fee_lamports = u64::try_from(fee_lamports).map_err(|_| ErrorCode::SwapMathOverflow)?;
+        if fee_lamports == 0 {
+            return Ok(());
+        }
+
+        let (fee_lst_min, _fee_lst_max) = invoke_sol_value_calculator(
+            &ctx.accounts.sol_value_calculator_program,
+            &ctx.accounts.current_lst_mint,
+            ctx.remaining_accounts,
+            1,
+            fee_lamports,
+        )?;
+        if fee_lst_min == 0 {
             return Ok(());
         }
 
@@ -239,11 +335,11 @@ pub mod stake_rotator {
                 },
                 seeds,
             ),
-            fee_lst_units,
+            fee_lst_min,
         )?;
 
         let v = &mut ctx.accounts.vault;
-        v.high_water_mark_lamports = nav_lamports - (fee_lamports as u64);
+        v.high_water_mark_lamports = nav_min_lamports.saturating_sub(fee_lamports);
         Ok(())
     }
 }
@@ -355,6 +451,8 @@ pub struct ClaimPerfFee<'info> {
     #[account(mut, token::mint = current_lst_mint)]
     pub fee_destination: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
+    /// CHECK: must be one of Sanctum's pinned SOL Value Calculator programs.
+    pub sol_value_calculator_program: UncheckedAccount<'info>,
 }
 
 #[error_code]
@@ -373,6 +471,8 @@ pub enum ErrorCode {
     SlippageExceeded,
     #[msg("source token account did not decrease — swap did not execute")]
     SourceUnchanged,
-    #[msg("oracle value must be > 0")]
+    #[msg("oracle value returned by SOL value calculator is invalid")]
     InvalidOracleValue,
+    #[msg("oracle program is not an allowed Sanctum SOL value calculator")]
+    InvalidOracleProgram,
 }

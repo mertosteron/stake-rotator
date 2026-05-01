@@ -6,11 +6,14 @@
 
 import fs from "node:fs";
 import {
+  AddressLookupTableAccount,
   Connection,
   Keypair,
   PublicKey,
   Transaction,
   TransactionInstruction,
+  TransactionMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { isNotNull } from "drizzle-orm";
@@ -73,6 +76,7 @@ interface JupiterSwapIx {
   data: Uint8Array;
   minOutAmount: bigint;
   computeBudgetInstructions: TransactionInstruction[];
+  addressLookupTableAddresses: PublicKey[];
 }
 
 function decodeInstruction(raw: JupiterRawInstruction): TransactionInstruction {
@@ -148,14 +152,9 @@ async function buildJupiterIx(
       "Jupiter returned setupInstructions; ensure vault ATAs exist before requesting swap instructions",
     );
   }
-  if (
-    data.addressLookupTableAddresses &&
-    data.addressLookupTableAddresses.length > 0
-  ) {
-    throw new Error(
-      "Jupiter returned address lookup tables; legacy worker transaction does not support v0 ALT swaps yet",
-    );
-  }
+  const addressLookupTableAddresses = (
+    data.addressLookupTableAddresses ?? []
+  ).map((address) => new PublicKey(address));
 
   const swapIx = decodeInstruction(data.swapInstruction);
   if (!swapIx.programId.equals(JUPITER_V6_PROGRAM_ID)) {
@@ -171,7 +170,27 @@ async function buildJupiterIx(
     computeBudgetInstructions: (data.computeBudgetInstructions ?? []).map(
       decodeInstruction,
     ),
+    addressLookupTableAddresses,
   };
+}
+
+async function fetchLookupTables(
+  conn: Connection,
+  addresses: PublicKey[],
+): Promise<AddressLookupTableAccount[]> {
+  if (addresses.length === 0) return [];
+  const tables = await Promise.all(
+    addresses.map(async (address) => {
+      const res = await conn.getAddressLookupTable(address);
+      if (!res.value) {
+        throw new Error(
+          `address lookup table not found: ${address.toBase58()}`,
+        );
+      }
+      return res.value;
+    }),
+  );
+  return tables;
 }
 
 async function ensureAta(
@@ -277,15 +296,21 @@ async function processUser(
     swap.accounts,
   );
 
-  const tx = new Transaction();
-  tx.add(...swap.computeBudgetInstructions);
-  tx.add(ix);
+  const instructions = [...swap.computeBudgetInstructions, ix];
 
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = bot.publicKey;
-  tx.sign(bot);
   try {
+    const lookupTables = await fetchLookupTables(
+      conn,
+      swap.addressLookupTableAddresses,
+    );
+    const message = new TransactionMessage({
+      payerKey: bot.publicKey,
+      recentBlockhash: blockhash,
+      instructions,
+    }).compileToV0Message(lookupTables);
+    const tx = new VersionedTransaction(message);
+    tx.sign([bot]);
     const sig = await conn.sendRawTransaction(tx.serialize(), {
       skipPreflight: false,
     });

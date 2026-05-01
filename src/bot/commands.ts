@@ -1,8 +1,17 @@
-import type { Bot } from "grammy";
+import type { Bot, Context } from "grammy";
 import { eq } from "drizzle-orm";
-import { Connection, PublicKey, Transaction } from "@solana/web3.js";
+import {
+  Connection,
+  PublicKey,
+  Transaction,
+  type TransactionInstruction,
+} from "@solana/web3.js";
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 import { randomUUID } from "node:crypto";
-import { TRACKED_LSTS, type LstSymbol } from "../lsts.ts";
+import { LSTS, TRACKED_LSTS, type LstSymbol } from "../lsts.ts";
 import { fetchSnapshot, type LstSnapshot } from "../sanctum.ts";
 import { rankRotations, type Rotation } from "../calc.ts";
 import { fetchLstHoldings, type LstHolding } from "../balances.ts";
@@ -11,7 +20,13 @@ import { getDb } from "../db/client.ts";
 import { users, type User } from "../db/schema.ts";
 import { env } from "../env.ts";
 import { registerRotation } from "../actions/server.ts";
-import { ixRevokeAuthority } from "../program.ts";
+import {
+  deriveVault,
+  ixDepositLst,
+  ixInitVault,
+  ixRevokeAuthority,
+  ixWithdrawLst,
+} from "../program.ts";
 
 async function getOrCreateUser(telegramId: bigint): Promise<User> {
   const db = getDb();
@@ -48,6 +63,48 @@ function isValidPubkey(s: string): boolean {
   } catch {
     return false;
   }
+}
+
+function parseLstSymbol(raw: string): LstSymbol | null {
+  const match = TRACKED_LSTS.find(
+    (s) => s.toLowerCase() === raw.trim().toLowerCase(),
+  );
+  return match ?? null;
+}
+
+function parseUiAmount(raw: string, decimals: number): bigint | null {
+  const value = raw.trim();
+  if (!/^\d+(\.\d+)?$/.test(value)) return null;
+  const [whole, frac = ""] = value.split(".");
+  if (!whole || frac.length > decimals) return null;
+  return BigInt(whole + frac.padEnd(decimals, "0"));
+}
+
+async function buildUserSignedTx(
+  owner: PublicKey,
+  instructions: TransactionInstruction[],
+): Promise<string> {
+  const conn = new Connection(env.heliusRpcUrl(), "confirmed");
+  const { blockhash } = await conn.getLatestBlockhash("confirmed");
+  const tx = new Transaction().add(...instructions);
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = owner;
+  return tx.serialize({ requireAllSignatures: false }).toString("base64");
+}
+
+async function replyBase64Tx(
+  ctx: Context,
+  title: string,
+  b64: string,
+): Promise<void> {
+  await ctx.reply(
+    [title, "sign this base64 tx in your wallet:", "```", b64, "```"].join(
+      "\n",
+    ),
+    {
+      parse_mode: "Markdown",
+    },
+  );
 }
 
 function pickSource(
@@ -105,6 +162,9 @@ export function registerCommands(bot: Bot) {
         "Commands:",
         "/bind_wallet <pubkey> — link your Solana wallet (read-only)",
         "/status — show bound wallet and LST holdings",
+        "/init_vault [perf_fee_bps_max] — create your non-custodial vault",
+        "/deposit <LST> <amount> — move LST into your vault",
+        "/withdraw <LST> <amount> — move LST back to your wallet",
         "/recommend — show best rotation candidate",
         "/rotate — build the rotation transaction",
       ].join("\n"),
@@ -163,6 +223,126 @@ export function registerCommands(bot: Bot) {
       `payback ≤ ${user.paybackDaysMax}d  source ${user.sourceLst ?? "auto"}`,
     );
     await ctx.reply(lines.join("\n"));
+  });
+
+  bot.command("init_vault", async (ctx) => {
+    const tgId = ctx.from?.id;
+    if (!tgId) return;
+    const user = await getOrCreateUser(BigInt(tgId));
+    if (!user.walletPubkey) {
+      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      return;
+    }
+
+    const rawFee = ctx.match.trim();
+    const perfFeeBpsMax = rawFee ? Number(rawFee) : 250;
+    if (
+      !Number.isInteger(perfFeeBpsMax) ||
+      perfFeeBpsMax < 0 ||
+      perfFeeBpsMax > 2000
+    ) {
+      await ctx.reply(
+        "usage: /init_vault [perf_fee_bps_max], range 0..2000 (default 250)",
+      );
+      return;
+    }
+
+    const owner = new PublicKey(user.walletPubkey);
+    const rotationAuthority = new PublicKey(env.rotationAuthorityPubkey());
+    const b64 = await buildUserSignedTx(owner, [
+      ixInitVault(owner, rotationAuthority, perfFeeBpsMax),
+    ]);
+    await replyBase64Tx(
+      ctx,
+      `init vault — rotation authority ${rotationAuthority.toBase58()}, max perf fee ${perfFeeBpsMax} bps`,
+      b64,
+    );
+  });
+
+  bot.command("deposit", async (ctx) => {
+    const tgId = ctx.from?.id;
+    if (!tgId) return;
+    const user = await getOrCreateUser(BigInt(tgId));
+    if (!user.walletPubkey) {
+      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      return;
+    }
+
+    const [symbolRaw, amountRaw] = ctx.match.trim().split(/\s+/);
+    const symbol = symbolRaw ? parseLstSymbol(symbolRaw) : null;
+    if (!symbol || !amountRaw) {
+      await ctx.reply(`usage: /deposit <${TRACKED_LSTS.join("|")}> <amount>`);
+      return;
+    }
+    const meta = LSTS[symbol];
+    const amount = parseUiAmount(amountRaw, meta.decimals);
+    if (!amount || amount <= 0n) {
+      await ctx.reply(`invalid amount for ${symbol}: ${amountRaw}`);
+      return;
+    }
+
+    const owner = new PublicKey(user.walletPubkey);
+    const [vault] = deriveVault(owner);
+    const mint = new PublicKey(meta.mint);
+    const ownerAta = getAssociatedTokenAddressSync(mint, owner);
+    const vaultAta = getAssociatedTokenAddressSync(mint, vault, true);
+    const b64 = await buildUserSignedTx(owner, [
+      createAssociatedTokenAccountIdempotentInstruction(
+        owner,
+        vaultAta,
+        vault,
+        mint,
+      ),
+      ixDepositLst(owner, mint, ownerAta, vaultAta, amount),
+    ]);
+    await replyBase64Tx(
+      ctx,
+      `deposit ${amountRaw} ${symbol} into vault ${vault.toBase58()}`,
+      b64,
+    );
+  });
+
+  bot.command("withdraw", async (ctx) => {
+    const tgId = ctx.from?.id;
+    if (!tgId) return;
+    const user = await getOrCreateUser(BigInt(tgId));
+    if (!user.walletPubkey) {
+      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      return;
+    }
+
+    const [symbolRaw, amountRaw] = ctx.match.trim().split(/\s+/);
+    const symbol = symbolRaw ? parseLstSymbol(symbolRaw) : null;
+    if (!symbol || !amountRaw) {
+      await ctx.reply(`usage: /withdraw <${TRACKED_LSTS.join("|")}> <amount>`);
+      return;
+    }
+    const meta = LSTS[symbol];
+    const amount = parseUiAmount(amountRaw, meta.decimals);
+    if (!amount || amount <= 0n) {
+      await ctx.reply(`invalid amount for ${symbol}: ${amountRaw}`);
+      return;
+    }
+
+    const owner = new PublicKey(user.walletPubkey);
+    const [vault] = deriveVault(owner);
+    const mint = new PublicKey(meta.mint);
+    const ownerAta = getAssociatedTokenAddressSync(mint, owner);
+    const vaultAta = getAssociatedTokenAddressSync(mint, vault, true);
+    const b64 = await buildUserSignedTx(owner, [
+      createAssociatedTokenAccountIdempotentInstruction(
+        owner,
+        ownerAta,
+        owner,
+        mint,
+      ),
+      ixWithdrawLst(owner, mint, ownerAta, vaultAta, amount),
+    ]);
+    await replyBase64Tx(
+      ctx,
+      `withdraw ${amountRaw} ${symbol} from vault ${vault.toBase58()}`,
+      b64,
+    );
   });
 
   bot.command("recommend", async (ctx) => {

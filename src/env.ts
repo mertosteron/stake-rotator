@@ -24,6 +24,7 @@ export const env = {
   stakeRotatorProgramId: () =>
     optional("STAKE_ROTATOR_PROGRAM_ID") ??
     "5ra9y6YL7dqWWHGvVDQsuj4HND3DeLaea38jHEMvGoaS",
+  rotationAuthorityPubkey: () => required("ROTATION_AUTHORITY_PUBKEY"),
   botPublicHost: () => optional("BOT_PUBLIC_HOST"),
   actionsPort: () => Number(optional("ACTIONS_PORT") ?? "8787"),
 };

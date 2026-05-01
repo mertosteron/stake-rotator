@@ -198,8 +198,13 @@ export function ixClaimPerfFee(
   currentLstMint: PublicKey,
   vaultAta: PublicKey,
   feeDestination: PublicKey,
-  currentSolValuePerLst: bigint,
+  solValueCalculatorProgram: PublicKey,
   feeBps: number,
+  calculatorAccounts: Array<{
+    pubkey: PublicKey;
+    isSigner: boolean;
+    isWritable: boolean;
+  }> = [],
 ): TransactionInstruction {
   const [vault] = deriveVault(vaultOwner);
   return new TransactionInstruction({
@@ -211,11 +216,9 @@ export function ixClaimPerfFee(
       { pubkey: vaultAta, isSigner: false, isWritable: true },
       { pubkey: feeDestination, isSigner: false, isWritable: true },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: solValueCalculatorProgram, isSigner: false, isWritable: false },
+      ...calculatorAccounts,
     ],
-    data: Buffer.concat([
-      disc("claim_performance_fee"),
-      encU64(currentSolValuePerLst),
-      encU16(feeBps),
-    ]),
+    data: Buffer.concat([disc("claim_performance_fee"), encU16(feeBps)]),
   });
 }
