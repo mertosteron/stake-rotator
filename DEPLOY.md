@@ -9,10 +9,10 @@ deployed once per cluster.
 ## 1. Anchor program (Phase 4.5)
 
 ```bash
-cd program
+cd onchain
 solana-keygen new -o target/deploy/stake_rotator-keypair.json   # one-time
 # Update declare_id! in programs/stake_rotator/src/lib.rs to the new pubkey,
-# and STAKE_ROTATOR_PROGRAM_ID in app/src/program.ts.
+# and set STAKE_ROTATOR_PROGRAM_ID in the app service environment.
 ./scripts/deploy.sh devnet
 # Smoke-test with the bankrun scaffold (or anchor test on devnet) before mainnet.
 ./scripts/deploy.sh mainnet-beta
@@ -65,9 +65,9 @@ webhook on `accounts` for the bot pubkey).
 - [ ] Postgres provisioned, `pnpm migrate` run.
 - [ ] `BOT_PUBLIC_HOST` is reachable over HTTPS and serves the Actions JSON.
 - [ ] Bot keypair funded with ≥ 0.1 SOL.
-- [ ] `STAKE_ROTATOR_PROGRAM_ID` matches the deployed program on the target
-      cluster (devnet vs mainnet — get this wrong and execute_rotation will
-      no-op or fail silently).
+- [ ] `STAKE_ROTATOR_PROGRAM_ID` environment variable matches the deployed program
+      on the target cluster (devnet vs mainnet — get this wrong and
+      execute_rotation will no-op or fail silently).
 - [ ] `users.payback_days_max` defaults reviewed — 30 days is conservative.
 - [ ] Smoke-test: bind a wallet → /init_vault (TODO: not yet wired into the bot)
       → deposit 0.1 LST → /recommend → /rotate → /revoke.
@@ -81,14 +81,15 @@ real user funds touch the program:
 
 1. `init_vault` / `deposit` / `withdraw` are not yet exposed as bot commands
    (only `/revoke` is). Users can't onboard end-to-end without these.
-2. `buildJupiterIx` in `src/worker/index.ts` throws — wire Jupiter
-   `/swap-instructions` (POST endpoint, returns programs/accounts/data) and
-   forward as `remaining_accounts` to `execute_rotation`.
+2. `src/worker/index.ts` supports Jupiter `/swap-instructions` for legacy
+   transactions, but v0 address lookup table routes are rejected until the worker
+   is upgraded to build versioned transactions.
 3. `claim_performance_fee` trusts the bot to pass `current_sol_value_per_lst`.
    Replace with on-chain Sanctum oracle read before mainnet.
 4. Replace the worker's polling loop with a Helius epoch-boundary webhook
    (Phase 1.2 — never implemented in code, only in `.env.example`).
-5. Bankrun tests are scaffolded but the IDL bindings are TODO. Run
-   `anchor build` then wire `@coral-xyz/anchor` in `tests/vault.bankrun.ts`.
+5. Bankrun tests cover the TypeScript client instruction encoding and PDA
+   derivation shape. Add full on-chain state assertions after `anchor build`
+   produces an IDL and program binary in CI.
 6. Performance fee accounting needs an on-chain audit before mainnet — the
    `perf_fee_bps_max` cap is the only protection against bot misbehavior.

@@ -1,6 +1,5 @@
 import { LSTS, type LstSymbol } from "./lsts.ts";
-
-const JUP_BASE = "https://lite-api.jup.ag/swap/v1";
+import { env } from "./env.ts";
 
 interface QuoteResponse {
   inputMint: string;
@@ -29,8 +28,11 @@ export async function quoteLstToLst(
     amount: amountInBaseUnits.toString(),
     slippageBps: slippageBps.toString(),
   });
-  const res = await fetch(`${JUP_BASE}/quote?${params}`);
-  if (!res.ok) throw new Error(`Jupiter ${res.status} ${res.statusText} for ${from}->${to}`);
+  const res = await fetch(`${env.jupiterApiBase()}/quote?${params}`);
+  if (!res.ok)
+    throw new Error(
+      `Jupiter ${res.status} ${res.statusText} for ${from}->${to}`,
+    );
   const data = (await res.json()) as QuoteResponse;
   return {
     inAmount: BigInt(data.inAmount),

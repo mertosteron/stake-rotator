@@ -1,6 +1,5 @@
 import { LSTS, type LstSymbol } from "./lsts.ts";
-
-const JUP_BASE = "https://lite-api.jup.ag/swap/v1";
+import { env } from "./env.ts";
 
 interface QuoteResponse {
   inputMint: string;
@@ -43,13 +42,13 @@ export async function buildRotationTx(
     amount: amountInBaseUnits.toString(),
     slippageBps: slippageBps.toString(),
   });
-  const quoteRes = await fetch(`${JUP_BASE}/quote?${params}`);
+  const quoteRes = await fetch(`${env.jupiterApiBase()}/quote?${params}`);
   if (!quoteRes.ok) {
     throw new Error(`Jupiter quote ${quoteRes.status} ${quoteRes.statusText}`);
   }
   const quote = (await quoteRes.json()) as QuoteResponse;
 
-  const swapRes = await fetch(`${JUP_BASE}/swap`, {
+  const swapRes = await fetch(`${env.jupiterApiBase()}/swap`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -62,7 +61,9 @@ export async function buildRotationTx(
   });
   if (!swapRes.ok) {
     const text = await swapRes.text().catch(() => "");
-    throw new Error(`Jupiter swap ${swapRes.status} ${swapRes.statusText} ${text}`);
+    throw new Error(
+      `Jupiter swap ${swapRes.status} ${swapRes.statusText} ${text}`,
+    );
   }
   const swap = (await swapRes.json()) as SwapResponse;
 

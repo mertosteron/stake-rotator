@@ -25,13 +25,13 @@ export interface RankRotationsArgs {
   slippageBps?: number;
 }
 
-const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
-
 function toBaseUnits(amountLst: number, decimals: number): bigint {
   return BigInt(Math.floor(amountLst * 10 ** decimals));
 }
 
-export async function rankRotations(args: RankRotationsArgs): Promise<Rotation[]> {
+export async function rankRotations(
+  args: RankRotationsArgs,
+): Promise<Rotation[]> {
   const { source, sourceBalanceSol, snapshot } = args;
   const paybackDaysMax = args.paybackDaysMax ?? 30;
   const slippageBps = args.slippageBps ?? 50;
@@ -53,7 +53,12 @@ export async function rankRotations(args: RankRotationsArgs): Promise<Rotation[]
   const quotes = await Promise.all(
     candidates.map(async (dest) => {
       try {
-        const q = await quoteLstToLst(source, dest.symbol, sourceBaseUnits, slippageBps);
+        const q = await quoteLstToLst(
+          source,
+          dest.symbol,
+          sourceBaseUnits,
+          slippageBps,
+        );
         return { dest, quote: q };
       } catch (err) {
         return { dest, error: err };
@@ -67,7 +72,8 @@ export async function rankRotations(args: RankRotationsArgs): Promise<Rotation[]
     const { dest, quote } = item;
     if (dest.apy === null || dest.solPerLst === null) continue;
 
-    const outputLstAmount = Number(quote.outAmount) / 10 ** LSTS[dest.symbol].decimals;
+    const outputLstAmount =
+      Number(quote.outAmount) / 10 ** LSTS[dest.symbol].decimals;
     const outputSol = outputLstAmount * dest.solPerLst;
     const swapCostSol = sourceBalanceSol - outputSol;
     const swapCostBps = (swapCostSol / sourceBalanceSol) * 10_000;
@@ -102,4 +108,4 @@ export async function rankRotations(args: RankRotationsArgs): Promise<Rotation[]
   });
 }
 
-export const _internal = { SECONDS_PER_YEAR, toBaseUnits };
+export const _internal = { toBaseUnits };

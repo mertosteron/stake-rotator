@@ -1,6 +1,6 @@
 import type { Bot } from "grammy";
 import { eq } from "drizzle-orm";
-import { PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 import { randomUUID } from "node:crypto";
 import { TRACKED_LSTS, type LstSymbol } from "../lsts.ts";
 import { fetchSnapshot, type LstSnapshot } from "../sanctum.ts";
@@ -11,12 +11,15 @@ import { getDb } from "../db/client.ts";
 import { users, type User } from "../db/schema.ts";
 import { env } from "../env.ts";
 import { registerRotation } from "../actions/server.ts";
-import { Connection, Transaction } from "@solana/web3.js";
 import { ixRevokeAuthority } from "../program.ts";
 
 async function getOrCreateUser(telegramId: bigint): Promise<User> {
   const db = getDb();
-  const existing = await db.select().from(users).where(eq(users.telegramId, telegramId)).limit(1);
+  const existing = await db
+    .select()
+    .from(users)
+    .where(eq(users.telegramId, telegramId))
+    .limit(1);
   if (existing[0]) return existing[0];
   const inserted = await db.insert(users).values({ telegramId }).returning();
   const row = inserted[0];
@@ -24,7 +27,10 @@ async function getOrCreateUser(telegramId: bigint): Promise<User> {
   return row;
 }
 
-async function setWallet(telegramId: bigint, walletPubkey: string): Promise<void> {
+async function setWallet(
+  telegramId: bigint,
+  walletPubkey: string,
+): Promise<void> {
   const db = getDb();
   await db
     .insert(users)
@@ -68,7 +74,9 @@ function pickSource(
       const bestSnap = best ? bySymbol.get(best.symbol) : undefined;
       if (!curSnap || curSnap.solPerLst === null) return best;
       if (!best || !bestSnap || bestSnap.solPerLst === null) return cur;
-      return cur.amount * curSnap.solPerLst > best.amount * bestSnap.solPerLst ? cur : best;
+      return cur.amount * curSnap.solPerLst > best.amount * bestSnap.solPerLst
+        ? cur
+        : best;
     }, undefined);
   }
   if (!chosen) return null;
@@ -79,7 +87,9 @@ function pickSource(
 
 function fmtRotation(r: Rotation): string {
   const flag = r.recommended ? "✓" : "•";
-  const payback = Number.isFinite(r.paybackDays) ? `${r.paybackDays.toFixed(1)}d` : "never";
+  const payback = Number.isFinite(r.paybackDays)
+    ? `${r.paybackDays.toFixed(1)}d`
+    : "never";
   return `${flag} ${r.source} → ${r.dest}  +${r.apyUpliftPp.toFixed(2)}pp  payback ${payback}  daily +${r.dailyUpliftSol.toFixed(5)} SOL`;
 }
 
@@ -141,14 +151,17 @@ export function registerCommands(bot: Bot) {
     for (const h of holdings) {
       const snap = bySym.get(h.symbol);
       const valueSol = snap?.solPerLst ? h.amount * snap.solPerLst : null;
-      const apy = snap?.apy != null ? `${(snap.apy * 100).toFixed(2)}% APY` : "n/a APY";
+      const apy =
+        snap?.apy != null ? `${(snap.apy * 100).toFixed(2)}% APY` : "n/a APY";
       lines.push(
         `  ${h.symbol}: ${h.amount.toFixed(4)}  (${valueSol === null ? "?" : valueSol.toFixed(4)} SOL, ${apy})`,
       );
       if (valueSol !== null) totalSol += valueSol;
     }
     lines.push(`total: ${totalSol.toFixed(4)} SOL`);
-    lines.push(`payback ≤ ${user.paybackDaysMax}d  source ${user.sourceLst ?? "auto"}`);
+    lines.push(
+      `payback ≤ ${user.paybackDaysMax}d  source ${user.sourceLst ?? "auto"}`,
+    );
     await ctx.reply(lines.join("\n"));
   });
 
@@ -198,14 +211,16 @@ export function registerCommands(bot: Bot) {
       await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
       return;
     }
-    const owner = new (await import("@solana/web3.js")).PublicKey(user.walletPubkey);
+    const owner = new PublicKey(user.walletPubkey);
     const ix = ixRevokeAuthority(owner);
     const conn = new Connection(env.heliusRpcUrl(), "confirmed");
     const { blockhash } = await conn.getLatestBlockhash("confirmed");
     const tx = new Transaction().add(ix);
     tx.recentBlockhash = blockhash;
     tx.feePayer = owner;
-    const b64 = tx.serialize({ requireAllSignatures: false }).toString("base64");
+    const b64 = tx
+      .serialize({ requireAllSignatures: false })
+      .toString("base64");
     await ctx.reply(
       [
         "kill-switch — revokes the bot's rotation authority on your vault.",
@@ -262,7 +277,7 @@ export function registerCommands(bot: Bot) {
     const host = env.botPublicHost();
     if (host) {
       const id = randomUUID();
-      registerRotation({
+      await registerRotation({
         id,
         telegramId: BigInt(tgId),
         walletPubkey: user.walletPubkey,
@@ -297,4 +312,3 @@ export function registerCommands(bot: Bot) {
     }
   });
 }
-

@@ -9,14 +9,16 @@
     "recommend": "tsx src/recommend.ts",
     "bot": "tsx src/bot/index.ts",
     "worker": "tsx src/worker/index.ts",
-    "migrate": "tsx src/db/migrate.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:push": "drizzle-kit push",
+    "migrate": "drizzle-kit migrate",
+    "test:onchain": "tsx onchain/tests/vault.bankrun.ts",
     "typecheck": "tsc --noEmit"
   },
   "packageManager": "pnpm@10.33.2",
   "dependencies": {
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.95.4",
-    "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.36.4",
     "grammy": "^1.30.0",
@@ -24,6 +26,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "drizzle-kit": "^0.31.10",
     "tsx": "^4.21.0",
     "typescript": "^6.0.3"
   }

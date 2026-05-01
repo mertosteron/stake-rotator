@@ -16,7 +16,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{instruction::Instruction, program::invoke_signed};
 use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
-declare_id!("RotatoR1111111111111111111111111111111111111");
+declare_id!("5ra9y6YL7dqWWHGvVDQsuj4HND3DeLaea38jHEMvGoaS");
 
 const VAULT_SEED: &[u8] = b"vault";
 const LAMPORTS_PER_SOL_U128: u128 = 1_000_000_000;

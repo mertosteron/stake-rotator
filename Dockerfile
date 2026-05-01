@@ -8,7 +8,8 @@ RUN pnpm install --frozen-lockfile --prod=false
 
 FROM base AS runtime
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json pnpm-lock.yaml tsconfig.json ./
+COPY package.json pnpm-lock.yaml tsconfig.json drizzle.config.ts ./
+COPY drizzle ./drizzle
 COPY src ./src
 ENV NODE_ENV=production
 

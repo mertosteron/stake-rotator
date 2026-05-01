@@ -3,10 +3,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-stake_rotator = "RotatoR1111111111111111111111111111111111111"
+stake_rotator = "5ra9y6YL7dqWWHGvVDQsuj4HND3DeLaea38jHEMvGoaS"
 
 [programs.devnet]
-stake_rotator = "RotatoR1111111111111111111111111111111111111"
+stake_rotator = "5ra9y6YL7dqWWHGvVDQsuj4HND3DeLaea38jHEMvGoaS"
 
 [registry]
 url = "https://api.apr.dev"

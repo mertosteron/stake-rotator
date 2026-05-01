@@ -3,24 +3,28 @@
 // Polls every WORKER_TICK_MS for users opted-in (rotation_authority active,
 // vault initialized) and executes optimal rotations. Replace the polling loop
 // with a Helius epoch-boundary webhook in production (Phase 1.2).
-//
-// The Jupiter /swap-instructions integration is sketched but left TODO at the
-// `buildJupiterIx` call — that endpoint returns the raw instruction (programs,
-// accounts, data) which is then forwarded to execute_rotation via remaining_accounts.
 
 import fs from "node:fs";
-import { Connection, Keypair, PublicKey, Transaction } from "@solana/web3.js";
-import { eq, isNotNull } from "drizzle-orm";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  Transaction,
+  TransactionInstruction,
+} from "@solana/web3.js";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { isNotNull } from "drizzle-orm";
 import { env } from "../env.ts";
 import { getDb, closeDb } from "../db/client.ts";
 import { users, type User } from "../db/schema.ts";
 import { LSTS, TRACKED_LSTS, type LstSymbol } from "../lsts.ts";
-import { fetchSnapshot } from "../sanctum.ts";
+import { fetchSnapshot, type LstSnapshot } from "../sanctum.ts";
 import { rankRotations } from "../calc.ts";
 import { fetchLstHoldings } from "../balances.ts";
 import {
   deriveVault,
   ixExecuteRotation,
+  JUPITER_V6_PROGRAM_ID,
   STAKE_ROTATOR_PROGRAM_ID,
 } from "../program.ts";
 
@@ -33,28 +37,184 @@ function loadBotKeypair(): Keypair {
   return Keypair.fromSecretKey(Uint8Array.from(raw));
 }
 
+interface QuoteResponse {
+  inputMint: string;
+  outputMint: string;
+  inAmount: string;
+  outAmount: string;
+  otherAmountThreshold: string;
+  slippageBps: number;
+  priceImpactPct: string;
+  routePlan: unknown;
+}
+
+interface JupiterRawInstruction {
+  programId: string;
+  accounts: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>;
+  data: string;
+}
+
+interface SwapInstructionsResponse {
+  computeBudgetInstructions?: JupiterRawInstruction[];
+  setupInstructions?: JupiterRawInstruction[];
+  swapInstruction: JupiterRawInstruction;
+  cleanupInstruction?: JupiterRawInstruction | null;
+  tokenLedgerInstruction?: JupiterRawInstruction | null;
+  addressLookupTableAddresses?: string[];
+}
+
 interface JupiterSwapIx {
   programId: PublicKey;
-  accounts: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>;
+  accounts: Array<{
+    pubkey: PublicKey;
+    isSigner: boolean;
+    isWritable: boolean;
+  }>;
   data: Uint8Array;
+  minOutAmount: bigint;
+  computeBudgetInstructions: TransactionInstruction[];
+}
+
+function decodeInstruction(raw: JupiterRawInstruction): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: new PublicKey(raw.programId),
+    keys: raw.accounts.map((a) => ({
+      pubkey: new PublicKey(a.pubkey),
+      isSigner: a.isSigner,
+      isWritable: a.isWritable,
+    })),
+    data: Buffer.from(raw.data, "base64"),
+  });
+}
+
+async function fetchJupiterQuote(
+  from: LstSymbol,
+  to: LstSymbol,
+  amountBaseUnits: bigint,
+  slippageBps: number,
+): Promise<QuoteResponse> {
+  const params = new URLSearchParams({
+    inputMint: LSTS[from].mint,
+    outputMint: LSTS[to].mint,
+    amount: amountBaseUnits.toString(),
+    slippageBps: slippageBps.toString(),
+  });
+  const res = await fetch(`${env.jupiterApiBase()}/quote?${params}`);
+  if (!res.ok) {
+    throw new Error(`Jupiter quote ${res.status} ${res.statusText}`);
+  }
+  return (await res.json()) as QuoteResponse;
 }
 
 async function buildJupiterIx(
-  _from: LstSymbol,
-  _to: LstSymbol,
-  _amountBaseUnits: bigint,
-  _vaultPda: PublicKey,
-  _slippageBps: number,
+  from: LstSymbol,
+  to: LstSymbol,
+  amountBaseUnits: bigint,
+  vaultPda: PublicKey,
+  slippageBps: number,
 ): Promise<JupiterSwapIx> {
-  // TODO: POST to https://lite-api.jup.ag/swap/v1/swap-instructions with
-  //   { quoteResponse, userPublicKey: vaultPda.toBase58(), wrapAndUnwrapSol: false }
-  // Parse the returned `swapInstruction` (programs/accounts/data),
-  // plus `addressLookupTableAddresses`, `setupInstructions`, `cleanupInstruction`.
-  // Forward only the swapInstruction's accounts as remaining_accounts.
-  throw new Error("buildJupiterIx not implemented — wire Jupiter /swap-instructions");
+  const quote = await fetchJupiterQuote(from, to, amountBaseUnits, slippageBps);
+  const res = await fetch(`${env.jupiterApiBase()}/swap-instructions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey: vaultPda.toBase58(),
+      wrapAndUnwrapSol: false,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: "auto",
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `Jupiter swap-instructions ${res.status} ${res.statusText} ${text}`,
+    );
+  }
+
+  const data = (await res.json()) as SwapInstructionsResponse;
+  if (data.tokenLedgerInstruction) {
+    throw new Error(
+      "Jupiter returned tokenLedgerInstruction; worker does not support token ledger swaps",
+    );
+  }
+  if (data.cleanupInstruction) {
+    throw new Error(
+      "Jupiter returned cleanupInstruction; worker expected no cleanup with wrapAndUnwrapSol=false",
+    );
+  }
+  if (data.setupInstructions && data.setupInstructions.length > 0) {
+    throw new Error(
+      "Jupiter returned setupInstructions; ensure vault ATAs exist before requesting swap instructions",
+    );
+  }
+  if (
+    data.addressLookupTableAddresses &&
+    data.addressLookupTableAddresses.length > 0
+  ) {
+    throw new Error(
+      "Jupiter returned address lookup tables; legacy worker transaction does not support v0 ALT swaps yet",
+    );
+  }
+
+  const swapIx = decodeInstruction(data.swapInstruction);
+  if (!swapIx.programId.equals(JUPITER_V6_PROGRAM_ID)) {
+    throw new Error(
+      `Jupiter swap instruction used unexpected program ${swapIx.programId.toBase58()}`,
+    );
+  }
+  return {
+    programId: swapIx.programId,
+    accounts: swapIx.keys,
+    data: swapIx.data,
+    minOutAmount: BigInt(quote.otherAmountThreshold),
+    computeBudgetInstructions: (data.computeBudgetInstructions ?? []).map(
+      decodeInstruction,
+    ),
+  };
 }
 
-async function processUser(conn: Connection, bot: Keypair, user: User) {
+async function ensureAta(
+  conn: Connection,
+  bot: Keypair,
+  mint: PublicKey,
+  owner: PublicKey,
+): Promise<PublicKey> {
+  const { createAssociatedTokenAccountInstruction } =
+    await import("@solana/spl-token");
+  const address = getAssociatedTokenAddressSync(mint, owner, true);
+  const info = await conn.getAccountInfo(address, "confirmed");
+  if (info) return address;
+
+  const tx = new Transaction().add(
+    createAssociatedTokenAccountInstruction(
+      bot.publicKey,
+      address,
+      owner,
+      mint,
+    ),
+  );
+  const { blockhash, lastValidBlockHeight } =
+    await conn.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = bot.publicKey;
+  tx.sign(bot);
+  const sig = await conn.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false,
+  });
+  await conn.confirmTransaction(
+    { signature: sig, blockhash, lastValidBlockHeight },
+    "confirmed",
+  );
+  return address;
+}
+
+async function processUser(
+  conn: Connection,
+  bot: Keypair,
+  user: User,
+  snapshot: LstSnapshot[],
+) {
   if (!user.walletPubkey) return;
   const owner = new PublicKey(user.walletPubkey);
   const [vaultPda] = deriveVault(owner);
@@ -69,7 +229,6 @@ async function processUser(conn: Connection, bot: Keypair, user: User) {
   if (holdings.length === 0) return;
   const top = holdings.reduce((a, b) => (a.amount > b.amount ? a : b));
 
-  const snapshot = await fetchSnapshot(TRACKED_LSTS);
   const bySym = new Map(snapshot.map((s) => [s.symbol, s]));
   const srcSnap = bySym.get(top.symbol);
   if (!srcSnap || srcSnap.solPerLst === null) return;
@@ -84,27 +243,27 @@ async function processUser(conn: Connection, bot: Keypair, user: User) {
   const rec = rows.find((r) => r.recommended);
   if (!rec) return;
 
-  const minOut = (top.amountBaseUnits * 9950n) / 10000n; // 0.5% slippage on input units
-  let swap: JupiterSwapIx;
-  try {
-    swap = await buildJupiterIx(top.symbol, rec.dest, top.amountBaseUnits, vaultPda, 50);
-  } catch (err) {
-    console.error(`user ${user.telegramId}: swap build failed:`, (err as Error).message);
-    return;
-  }
-
   const sourceMint = new PublicKey(LSTS[top.symbol].mint);
   const destMint = new PublicKey(LSTS[rec.dest].mint);
-  // Vault ATAs are derived off-chain by the bot; for legacy SPL Token, the standard ATA program is used.
-  // Compute them via getAssociatedTokenAddressSync (allowOwnerOffCurve = true since vaultPda is a PDA).
-  const { getAssociatedTokenAddressSync } = await import("@solana/spl-token").catch(() => ({
-    getAssociatedTokenAddressSync: null as unknown as never,
-  }));
-  if (typeof getAssociatedTokenAddressSync !== "function") {
-    throw new Error("worker requires @solana/spl-token (pnpm add @solana/spl-token)");
-  }
   const vaultSrc = getAssociatedTokenAddressSync(sourceMint, vaultPda, true);
-  const vaultDst = getAssociatedTokenAddressSync(destMint, vaultPda, true);
+  const vaultDst = await ensureAta(conn, bot, destMint, vaultPda);
+
+  let swap: JupiterSwapIx;
+  try {
+    swap = await buildJupiterIx(
+      top.symbol,
+      rec.dest,
+      top.amountBaseUnits,
+      vaultPda,
+      50,
+    );
+  } catch (err) {
+    console.error(
+      `user ${user.telegramId}: swap build failed:`,
+      (err as Error).message,
+    );
+    return;
+  }
 
   const ix = ixExecuteRotation(
     owner,
@@ -114,30 +273,44 @@ async function processUser(conn: Connection, bot: Keypair, user: User) {
     vaultSrc,
     vaultDst,
     swap.data,
-    minOut,
+    swap.minOutAmount,
     swap.accounts,
   );
 
-  const tx = new Transaction().add(ix);
+  const tx = new Transaction();
+  tx.add(...swap.computeBudgetInstructions);
+  tx.add(ix);
+
   const { blockhash } = await conn.getLatestBlockhash("confirmed");
   tx.recentBlockhash = blockhash;
   tx.feePayer = bot.publicKey;
   tx.sign(bot);
   try {
-    const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-    console.log(`user ${user.telegramId}: rotation sent ${top.symbol}→${rec.dest} sig=${sig}`);
+    const sig = await conn.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+    });
+    console.log(
+      `user ${user.telegramId}: rotation sent ${top.symbol}→${rec.dest} sig=${sig}`,
+    );
   } catch (err) {
-    console.error(`user ${user.telegramId}: send failed`, (err as Error).message);
+    console.error(
+      `user ${user.telegramId}: send failed`,
+      (err as Error).message,
+    );
   }
 }
 
 async function tick(conn: Connection, bot: Keypair) {
   const db = getDb();
-  const optIns = await db.select().from(users).where(isNotNull(users.walletPubkey));
+  const optIns = await db
+    .select()
+    .from(users)
+    .where(isNotNull(users.walletPubkey));
+  const snapshot = await fetchSnapshot(TRACKED_LSTS);
   console.log(`tick: ${optIns.length} users`);
   for (const u of optIns) {
     try {
-      await processUser(conn, bot, u);
+      await processUser(conn, bot, u, snapshot);
     } catch (err) {
       console.error(`user ${u.telegramId}: processing error`, err);
     }
@@ -147,7 +320,9 @@ async function tick(conn: Connection, bot: Keypair) {
 async function main() {
   const conn = new Connection(env.heliusRpcUrl(), "confirmed");
   const bot = loadBotKeypair();
-  console.log(`worker starting (bot=${bot.publicKey.toBase58()}, tick=${TICK_MS}ms)`);
+  console.log(
+    `worker starting (bot=${bot.publicKey.toBase58()}, tick=${TICK_MS}ms)`,
+  );
 
   const shutdown = async () => {
     console.log("worker shutting down...");
@@ -159,8 +334,6 @@ async function main() {
 
   // Run once immediately, then on interval.
   await tick(conn, bot).catch((e) => console.error("tick error:", e));
-  // Suppress unused-eq lint by referencing it (used by future per-user query refinements).
-  void eq;
   setInterval(() => {
     tick(conn, bot).catch((e) => console.error("tick error:", e));
   }, TICK_MS);

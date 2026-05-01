@@ -1,5 +1,6 @@
 import { LSTS, type LstSymbol } from "./lsts.ts";
 import { env } from "./env.ts";
+import { TOKEN_PROGRAM_ID } from "./const.ts";
 
 interface RpcResponse<T> {
   jsonrpc: "2.0";
@@ -29,9 +30,10 @@ export interface LstHolding {
 
 // All currently tracked LSTs use the legacy SPL Token program.
 // If a Token-2022 LST is added to TRACKED_LSTS, also query TOKEN_2022_PROGRAM_ID.
-const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
-export async function fetchLstHoldings(walletPubkey: string): Promise<LstHolding[]> {
+export async function fetchLstHoldings(
+  walletPubkey: string,
+): Promise<LstHolding[]> {
   const url = env.heliusRpcUrl();
   const body = {
     jsonrpc: "2.0" as const,
@@ -39,7 +41,7 @@ export async function fetchLstHoldings(walletPubkey: string): Promise<LstHolding
     method: "getTokenAccountsByOwner",
     params: [
       walletPubkey,
-      { programId: TOKEN_PROGRAM_ID },
+      { programId: TOKEN_PROGRAM_ID.toBase58() },
       { encoding: "jsonParsed", commitment: "confirmed" },
     ],
   };
@@ -49,7 +51,9 @@ export async function fetchLstHoldings(walletPubkey: string): Promise<LstHolding
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Helius RPC ${res.status} ${res.statusText}`);
-  const json = (await res.json()) as RpcResponse<{ value: ParsedTokenAccount[] }>;
+  const json = (await res.json()) as RpcResponse<{
+    value: ParsedTokenAccount[];
+  }>;
   if (json.error) throw new Error(`Helius RPC error: ${json.error.message}`);
   if (!json.result) throw new Error("Helius RPC: empty result");
 

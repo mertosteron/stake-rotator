@@ -1,5 +1,8 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import { and, eq, gt, lt } from "drizzle-orm";
 import type { LstSymbol } from "../lsts.ts";
+import { getDb } from "../db/client.ts";
+import { pendingRotations, type PendingRotationRow } from "../db/schema.ts";
 
 export interface PendingRotation {
   id: string;
@@ -9,34 +12,87 @@ export interface PendingRotation {
   dest: LstSymbol;
   swapTransactionBase64: string;
   apyUpliftPp: number;
-  expiresAt: number;
+  expiresAt: Date;
 }
 
 const TTL_MS = 90 * 1000;
 
-const pending = new Map<string, PendingRotation>();
+function rowToPending(row: PendingRotationRow): PendingRotation {
+  return {
+    id: row.id,
+    telegramId: row.telegramId,
+    walletPubkey: row.walletPubkey,
+    source: row.source as LstSymbol,
+    dest: row.dest as LstSymbol,
+    swapTransactionBase64: row.swapTransactionBase64,
+    apyUpliftPp: row.apyUpliftPp,
+    expiresAt: row.expiresAt,
+  };
+}
 
-export function registerRotation(r: Omit<PendingRotation, "expiresAt">): PendingRotation {
-  const full: PendingRotation = { ...r, expiresAt: Date.now() + TTL_MS };
-  pending.set(r.id, full);
+export async function registerRotation(
+  r: Omit<PendingRotation, "expiresAt">,
+): Promise<PendingRotation> {
+  const full: PendingRotation = {
+    ...r,
+    expiresAt: new Date(Date.now() + TTL_MS),
+  };
+  const db = getDb();
+  await db
+    .delete(pendingRotations)
+    .where(lt(pendingRotations.expiresAt, new Date()));
+  await db
+    .insert(pendingRotations)
+    .values({
+      id: full.id,
+      telegramId: full.telegramId,
+      walletPubkey: full.walletPubkey,
+      source: full.source,
+      dest: full.dest,
+      swapTransactionBase64: full.swapTransactionBase64,
+      apyUpliftPp: full.apyUpliftPp,
+      expiresAt: full.expiresAt,
+    })
+    .onConflictDoUpdate({
+      target: pendingRotations.id,
+      set: {
+        telegramId: full.telegramId,
+        walletPubkey: full.walletPubkey,
+        source: full.source,
+        dest: full.dest,
+        swapTransactionBase64: full.swapTransactionBase64,
+        apyUpliftPp: full.apyUpliftPp,
+        expiresAt: full.expiresAt,
+      },
+    });
   return full;
 }
 
-export function getRotation(id: string): PendingRotation | undefined {
-  const r = pending.get(id);
-  if (!r) return undefined;
-  if (Date.now() > r.expiresAt) {
-    pending.delete(id);
-    return undefined;
-  }
-  return r;
+export async function getRotation(
+  id: string,
+): Promise<PendingRotation | undefined> {
+  const db = getDb();
+  const now = new Date();
+  const rows = await db
+    .select()
+    .from(pendingRotations)
+    .where(
+      and(eq(pendingRotations.id, id), gt(pendingRotations.expiresAt, now)),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (row) return rowToPending(row);
+
+  await db.delete(pendingRotations).where(eq(pendingRotations.id, id));
+  return undefined;
 }
 
 function corsHeaders(): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,PUT,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, Content-Encoding, Accept-Encoding",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, Content-Encoding, Accept-Encoding",
     "Access-Control-Expose-Headers": "X-Action-Version, X-Blockchain-Ids",
     "X-Action-Version": "2.4",
     "X-Blockchain-Ids": "solana:101",
@@ -44,7 +100,10 @@ function corsHeaders(): Record<string, string> {
 }
 
 function send(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { ...corsHeaders(), "content-type": "application/json" });
+  res.writeHead(status, {
+    ...corsHeaders(),
+    "content-type": "application/json",
+  });
   res.end(JSON.stringify(body));
 }
 
@@ -65,7 +124,9 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 }
 
 function parseRotateId(pathname: string): string | null {
-  const m = pathname.match(/^\/api\/actions\/rotate\/([A-Za-z0-9_-]{1,64})\/?$/);
+  const m = pathname.match(
+    /^\/api\/actions\/rotate\/([A-Za-z0-9_-]{1,64})\/?$/,
+  );
   return m && m[1] ? m[1] : null;
 }
 
@@ -87,7 +148,7 @@ async function handle(req: IncomingMessage, res: ServerResponse) {
     send(res, 404, { message: "not found" });
     return;
   }
-  const r = getRotation(id);
+  const r = await getRotation(id);
   if (!r) {
     send(res, 404, { message: "rotation expired or not found" });
     return;

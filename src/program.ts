@@ -4,11 +4,16 @@
 // client after `anchor build` produces target/idl/stake_rotator.json.
 
 import { createHash } from "node:crypto";
-import { PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
+import {
+  PublicKey,
+  SystemProgram,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "./const.ts";
+import { env } from "./env.ts";
 
 export const STAKE_ROTATOR_PROGRAM_ID = new PublicKey(
-  "RotatoR1111111111111111111111111111111111111",
+  env.stakeRotatorProgramId(),
 );
 export const JUPITER_V6_PROGRAM_ID = new PublicKey(
   "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
@@ -17,7 +22,10 @@ export const JUPITER_V6_PROGRAM_ID = new PublicKey(
 const VAULT_SEED = Buffer.from("vault");
 
 function disc(method: string): Buffer {
-  return createHash("sha256").update(`global:${method}`).digest().subarray(0, 8);
+  return createHash("sha256")
+    .update(`global:${method}`)
+    .digest()
+    .subarray(0, 8);
 }
 
 function encU64(n: bigint): Buffer {
@@ -39,7 +47,10 @@ function encVecU8(data: Uint8Array): Buffer {
 }
 
 export function deriveVault(owner: PublicKey): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync([VAULT_SEED, owner.toBuffer()], STAKE_ROTATOR_PROGRAM_ID);
+  return PublicKey.findProgramAddressSync(
+    [VAULT_SEED, owner.toBuffer()],
+    STAKE_ROTATOR_PROGRAM_ID,
+  );
 }
 
 export function ixInitVault(
@@ -131,7 +142,10 @@ export function ixSetRotationAuthority(
       { pubkey: vault, isSigner: false, isWritable: true },
       { pubkey: owner, isSigner: true, isWritable: false },
     ],
-    data: Buffer.concat([disc("set_rotation_authority"), newAuthority.toBuffer()]),
+    data: Buffer.concat([
+      disc("set_rotation_authority"),
+      newAuthority.toBuffer(),
+    ]),
   });
 }
 
@@ -149,7 +163,11 @@ export function ixExecuteRotation(
   vaultDestAta: PublicKey,
   swapData: Uint8Array,
   minOutAmount: bigint,
-  jupiterAccounts: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>,
+  jupiterAccounts: Array<{
+    pubkey: PublicKey;
+    isSigner: boolean;
+    isWritable: boolean;
+  }>,
 ): TransactionInstruction {
   const [vault] = deriveVault(vaultOwner);
   const data = Buffer.concat([
