@@ -62,34 +62,55 @@ webhook on `accounts` for the bot pubkey).
 
 ## 4. Pre-flight checklist
 
-- [ ] Postgres provisioned, `pnpm migrate` run.
+- [ ] Postgres provisioned; for a clean database run `pnpm migrate`, for an existing production database follow the baseline plan below first.
 - [ ] `BOT_PUBLIC_HOST` is reachable over HTTPS and serves the Actions JSON.
 - [ ] Bot keypair funded with ≥ 0.1 SOL.
+- [ ] `ROTATION_AUTHORITY_PUBKEY` is set to the bot keypair public key before users run `/init_vault`.
 - [ ] `STAKE_ROTATOR_PROGRAM_ID` environment variable matches the deployed program
       on the target cluster (devnet vs mainnet — get this wrong and
       execute_rotation will no-op or fail silently).
 - [ ] `users.payback_days_max` defaults reviewed — 30 days is conservative.
-- [ ] Smoke-test: bind a wallet → /init_vault (TODO: not yet wired into the bot)
-      → deposit 0.1 LST → /recommend → /rotate → /revoke.
+- [ ] Smoke-test: bind a wallet → `/init_vault` → `/deposit jitoSOL 0.1` → `/recommend` → `/rotate` → `/withdraw jitoSOL 0.1` → `/revoke`.
 - [ ] Monitoring: Sentry or simple log shipping for the bot + worker; alert on
       worker tick failures (silent worker = silent missed yield).
 
-## 5. Known gaps before mainnet
+## 5. Database migration baseline plan
 
-These were **deliberately deferred** in scaffolding and must be closed before
-real user funds touch the program:
+The initial Drizzle migration now uses `CREATE TABLE IF NOT EXISTS`, so a clean
+DB and a DB where the exact tables already exist will not fail on table creation.
+That is not a substitute for a production baseline check: if an existing table has
+different columns/types/defaults, Drizzle cannot safely infer your intent.
 
-1. `init_vault` / `deposit` / `withdraw` are not yet exposed as bot commands
-   (only `/revoke` is). Users can't onboard end-to-end without these.
-2. `src/worker/index.ts` supports Jupiter `/swap-instructions` for legacy
-   transactions, but v0 address lookup table routes are rejected until the worker
-   is upgraded to build versioned transactions.
-3. `claim_performance_fee` trusts the bot to pass `current_sol_value_per_lst`.
-   Replace with on-chain Sanctum oracle read before mainnet.
-4. Replace the worker's polling loop with a Helius epoch-boundary webhook
+Recommended paths:
+
+1. **Clean DB** — run `pnpm migrate` once.
+2. **Existing production DB with no app data to preserve** — point `DATABASE_URL`
+   at a cloned/staging DB first, run `pnpm db:push`, inspect the generated diff,
+   then run it on production during a maintenance window.
+3. **Existing production DB with app data to preserve** — manually verify that
+   `users` and `pending_rotations` match `src/db/schema.ts`; if they already do,
+   insert a baseline row into Drizzle's migration table for `0000_dusty_stryfe`
+   instead of re-running destructive DDL. If they do not, create an additive
+   baseline migration (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and test it
+   on a production snapshot before deploying.
+
+## 6. Remaining pre-mainnet checks
+
+The original onboarding and Jupiter v0/ALT gaps are closed in code:
+
+1. `/init_vault`, `/deposit`, and `/withdraw` are wired into the Telegram bot.
+2. The worker compiles Jupiter routes into v0 transactions and loads returned
+   address lookup tables instead of rejecting ALT routes.
+3. `claim_performance_fee` no longer accepts a bot-supplied LST/SOL price; it
+   invokes a pinned Sanctum SOL Value Calculator program on-chain and consumes its
+   return data.
+
+Still do before real user funds touch the program:
+
+1. Replace the worker's polling loop with a Helius epoch-boundary webhook
    (Phase 1.2 — never implemented in code, only in `.env.example`).
-5. Bankrun tests cover the TypeScript client instruction encoding and PDA
+2. Bankrun tests cover the TypeScript client instruction encoding and PDA
    derivation shape. Add full on-chain state assertions after `anchor build`
    produces an IDL and program binary in CI.
-6. Performance fee accounting needs an on-chain audit before mainnet — the
-   `perf_fee_bps_max` cap is the only protection against bot misbehavior.
+3. Performance fee accounting and each LST's required Sanctum calculator account
+   list need an external on-chain audit before mainnet.

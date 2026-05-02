@@ -24,22 +24,36 @@ const VAULT_SEED: &[u8] = b"vault";
 const SOL_VALUE_CALCULATOR_RETURN_LEN: usize = 16;
 
 // Jupiter v6 aggregator program ID.
-pub const JUPITER_V6_PROGRAM_ID: Pubkey =
-    anchor_lang::solana_program::pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+pub const JUPITER_V6_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    4, 121, 213, 91, 242, 49, 192, 110, 238, 116, 197, 110, 206, 104, 21, 7, 253, 177, 178, 222,
+    163, 244, 142, 81, 2, 177, 205, 162, 86, 188, 19, 143,
+]);
 
 // Sanctum SOL Value Calculator programs.
-pub const SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
-    anchor_lang::solana_program::pubkey!("sp1V4h2gWorkGhVcazBc22Hfo2f5sd7jcjT4EDPrWFF");
-pub const SANCTUM_SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
-    anchor_lang::solana_program::pubkey!("sspUE1vrh7xRoXxGsg7vR1zde2WdGtJRbyK9uRumBDy");
-pub const SANCTUM_SPL_MULTI_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
-    anchor_lang::solana_program::pubkey!("ssmbu3KZxgonUtjEMCKspZzxvUQCxAFnyh1rcHUeEDo");
-pub const MARINADE_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
-    anchor_lang::solana_program::pubkey!("mare3SCyfZkAndpBRBeonETmkCCB3TJTTrz8ZN2dnhP");
-pub const LIDO_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
-    anchor_lang::solana_program::pubkey!("1idUSy4MGGKyKhvjSnGZ6Zc7Q4eKQcibym4BkEEw9KR");
-pub const WSOL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey =
-    anchor_lang::solana_program::pubkey!("wsoGmxQLSvwWpuaidCApxN5kEowLe2HLQLJhCQnj4bE");
+pub const SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    13, 4, 49, 101, 142, 147, 255, 106, 156, 24, 242, 6, 148, 83, 103, 164, 26, 128, 182, 236,
+    186, 17, 81, 7, 50, 208, 50, 240, 166, 30, 111, 150,
+]);
+pub const SANCTUM_SPL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    13, 8, 128, 68, 114, 220, 21, 215, 58, 156, 67, 237, 167, 41, 139, 246, 75, 109, 45, 229,
+    183, 87, 36, 170, 15, 174, 217, 207, 28, 64, 6, 120,
+]);
+pub const SANCTUM_SPL_MULTI_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    13, 8, 113, 244, 157, 15, 149, 30, 172, 177, 5, 234, 25, 38, 117, 24, 106, 166, 213, 175,
+    70, 248, 124, 125, 30, 79, 206, 139, 50, 235, 5, 114,
+]);
+pub const MARINADE_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    11, 107, 214, 38, 17, 52, 58, 163, 112, 136, 117, 179, 109, 82, 198, 170, 177, 61, 242, 47,
+    115, 250, 17, 187, 124, 82, 172, 198, 86, 45, 197, 202,
+]);
+pub const LIDO_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    0, 47, 17, 228, 71, 112, 231, 24, 163, 45, 146, 53, 174, 166, 116, 136, 53, 249, 208, 90,
+    169, 236, 89, 199, 143, 251, 143, 84, 83, 117, 5, 108,
+]);
+pub const WSOL_SOL_VALUE_CALCULATOR_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    14, 14, 205, 10, 61, 204, 45, 160, 19, 92, 21, 237, 10, 251, 131, 152, 224, 213, 147, 237,
+    142, 198, 190, 169, 193, 75, 202, 207, 46, 96, 146, 173,
+]);
 
 fn is_allowed_sol_value_calculator(program_id: Pubkey) -> bool {
     matches!(
@@ -271,7 +285,10 @@ pub mod stake_rotator {
     /// Compute uplift over high-water-mark in SOL terms and transfer fee_bps of it
     /// from the vault token account to fee_destination, in current LST units.
     /// Valuation is performed through Sanctum's on-chain SOL Value Calculator CPI.
-    pub fn claim_performance_fee(ctx: Context<ClaimPerfFee>, fee_bps: u16) -> Result<()> {
+    pub fn claim_performance_fee<'info>(
+        ctx: Context<'_, '_, '_, 'info, ClaimPerfFee<'info>>,
+        fee_bps: u16,
+    ) -> Result<()> {
         let v = &ctx.accounts.vault;
         require!(
             v.rotation_authority != Pubkey::default(),

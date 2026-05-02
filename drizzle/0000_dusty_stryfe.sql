@@ -1,4 +1,4 @@
-CREATE TABLE "pending_rotations" (
+CREATE TABLE IF NOT EXISTS "pending_rotations" (
 	"id" text PRIMARY KEY NOT NULL,
 	"telegram_id" bigint NOT NULL,
 	"wallet_pubkey" text NOT NULL,
@@ -10,7 +10,7 @@ CREATE TABLE "pending_rotations" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "users" (
+CREATE TABLE IF NOT EXISTS "users" (
 	"telegram_id" bigint PRIMARY KEY NOT NULL,
 	"wallet_pubkey" text,
 	"source_lst" text,
