@@ -29,6 +29,10 @@ async function main() {
 
   await bot.api.setMyCommands([
     { command: "start", description: "register and show help" },
+    {
+      command: "compare",
+      description: "live LST market snapshot (read-only)",
+    },
     { command: "bind_wallet", description: "link a Solana wallet pubkey" },
     { command: "status", description: "show bound wallet and LST holdings" },
     {

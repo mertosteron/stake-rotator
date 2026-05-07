@@ -92,18 +92,21 @@ async function buildUserSignedTx(
   return tx.serialize({ requireAllSignatures: false }).toString("base64");
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 async function replyBase64Tx(
   ctx: Context,
   title: string,
   b64: string,
 ): Promise<void> {
   await ctx.reply(
-    [title, "sign this base64 tx in your wallet:", "```", b64, "```"].join(
-      "\n",
-    ),
-    {
-      parse_mode: "Markdown",
-    },
+    [title, "", "Sign this transaction in your wallet:", `<pre>${escapeHtml(b64)}</pre>`].join("\n"),
+    { parse_mode: "HTML" },
   );
 }
 
@@ -147,27 +150,152 @@ function fmtRotation(r: Rotation): string {
   const payback = Number.isFinite(r.paybackDays)
     ? `${r.paybackDays.toFixed(1)}d`
     : "never";
-  return `${flag} ${r.source} → ${r.dest}  +${r.apyUpliftPp.toFixed(2)}pp  payback ${payback}  daily +${r.dailyUpliftSol.toFixed(5)} SOL`;
+  return `${flag} <b>${r.source} → ${r.dest}</b>  +${r.apyUpliftPp.toFixed(2)}pp  ·  payback ${payback}  ·  +${r.dailyUpliftSol.toFixed(5)} SOL/day`;
 }
 
 export function registerCommands(bot: Bot) {
+  bot.command("compare", async (ctx) => {
+    const tgId = ctx.from?.id;
+    const ts = new Date().toISOString().replace("T", " ").slice(0, 16);
+
+    const snapshot = await fetchSnapshot(TRACKED_LSTS);
+    const ranked = [...snapshot].sort((a, b) => {
+      if (a.apy === null && b.apy === null) return 0;
+      if (a.apy === null) return 1;
+      if (b.apy === null) return -1;
+      return b.apy - a.apy;
+    });
+
+    let user: User | null = null;
+    let holdings: LstHolding[] = [];
+    if (tgId) {
+      user = await getOrCreateUser(BigInt(tgId));
+      if (user.walletPubkey) {
+        try {
+          holdings = await fetchLstHoldings(user.walletPubkey);
+        } catch {
+          holdings = [];
+        }
+      }
+    }
+    const heldSymbols = new Set(holdings.map((h) => h.symbol));
+
+    const lines: string[] = [`📈 <b>LST Market</b>  ·  ${ts} UTC`, ""];
+    for (const s of ranked) {
+      const arrow = heldSymbols.has(s.symbol) ? "▸" : " ";
+      const apy = s.apy === null ? "  n/a" : `${(s.apy * 100).toFixed(2)}%`;
+      const rate =
+        s.solPerLst === null ? "—" : `${s.solPerLst.toFixed(4)} SOL/LST`;
+      const sym = s.symbol.padEnd(8);
+      lines.push(`${arrow} <b>${sym}</b> ${apy.padStart(7)}  ·  ${rate}`);
+    }
+    const apyValues = ranked
+      .map((s) => s.apy)
+      .filter((a): a is number => a !== null);
+    if (apyValues.length >= 2) {
+      const top = ranked.find((s) => s.apy === Math.max(...apyValues));
+      const bottom = ranked.find((s) => s.apy === Math.min(...apyValues));
+      if (top && bottom && top.symbol !== bottom.symbol) {
+        const spread = ((top.apy ?? 0) - (bottom.apy ?? 0)) * 100;
+        lines.push("");
+        lines.push(
+          `🏆 Top APY: <b>${top.symbol}</b>  (+${spread.toFixed(2)}pp over ${bottom.symbol})`,
+        );
+      }
+    }
+
+    if (!user || !user.walletPubkey) {
+      lines.push("");
+      lines.push("Bind a wallet (/bind_wallet) for personalized advice.");
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      return;
+    }
+
+    if (holdings.length === 0) {
+      lines.push("");
+      lines.push("👛 No tracked LSTs in your wallet yet.");
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      return;
+    }
+
+    const picked = pickSource(user, holdings, snapshot);
+    if (!picked) {
+      lines.push("");
+      lines.push("👛 No eligible LST to advise on right now.");
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      return;
+    }
+
+    let rotations: Rotation[] = [];
+    try {
+      rotations = await rankRotations({
+        source: picked.holding.symbol,
+        sourceBalanceSol: picked.sourceBalanceSol,
+        snapshot,
+        paybackDaysMax: user.paybackDaysMax,
+      });
+    } catch {
+      rotations = [];
+    }
+
+    lines.push("");
+    lines.push(
+      `🔍 <b>Your move</b> — based on ${picked.holding.amount.toFixed(4)} ${picked.holding.symbol} (≈ ${picked.sourceBalanceSol.toFixed(4)} SOL)`,
+    );
+
+    const best = rotations[0];
+    if (!best || best.apyUpliftPp <= 0) {
+      lines.push(
+        `Hold <b>${picked.holding.symbol}</b> — nothing offers higher net yield right now.`,
+      );
+    } else {
+      const payback = Number.isFinite(best.paybackDays)
+        ? `${best.paybackDays.toFixed(1)}d`
+        : "never";
+      const verdict = best.recommended
+        ? `✅ <b>Switch to ${best.dest}</b>`
+        : `⚖️ <b>Best candidate: ${best.dest}</b>  (payback ${payback} > your ${user.paybackDaysMax}d limit)`;
+      lines.push(verdict);
+      lines.push(
+        `Uplift: +${best.apyUpliftPp.toFixed(2)}pp APY  ·  swap cost ${best.swapCostSol.toFixed(5)} SOL  ·  payback ${payback}`,
+      );
+      lines.push(`Daily gain after switch: +${best.dailyUpliftSol.toFixed(5)} SOL`);
+    }
+
+    lines.push("");
+    lines.push(
+      "<i>Read-only — no transaction is created. Run /rotate to actually swap.</i>",
+    );
+
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+  });
+
   bot.command("start", async (ctx) => {
     const tgId = ctx.from?.id;
     if (!tgId) return;
     await getOrCreateUser(BigInt(tgId));
     await ctx.reply(
       [
-        "Stake Rotator — non-custodial LST auto-rotation.",
+        "👋 <b>Stake Rotator</b>",
+        "Non-custodial LST auto-rotation on Solana.",
         "",
-        "Commands:",
-        "/bind_wallet <pubkey> — link your Solana wallet (read-only)",
-        "/status — show bound wallet and LST holdings",
-        "/init_vault [perf_fee_bps_max] — create your non-custodial vault",
-        "/deposit <LST> <amount> — move LST into your vault",
-        "/withdraw <LST> <amount> — move LST back to your wallet",
-        "/recommend — show best rotation candidate",
-        "/rotate — build the rotation transaction",
+        "<b>Quick start</b>",
+        "1. /bind_wallet <code>&lt;pubkey&gt;</code> — link your Solana wallet",
+        "2. /status — view your LST holdings",
+        "3. /recommend — see the best rotation",
+        "",
+        "<b>All commands</b>",
+        "• /compare — live LST market snapshot (read-only)",
+        "• /bind_wallet — link a wallet (read-only)",
+        "• /status — wallet &amp; holdings",
+        "• /init_vault — create your rotation vault",
+        "• /deposit — fund the vault",
+        "• /withdraw — pull funds out",
+        "• /recommend — best rotation candidate",
+        "• /rotate — build the rotation tx",
+        "• /revoke — kill-switch (revoke bot authority)",
       ].join("\n"),
+      { parse_mode: "HTML" },
     );
   });
 
@@ -176,15 +304,28 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const arg = ctx.match.trim();
     if (!arg) {
-      await ctx.reply("usage: /bind_wallet <solana-pubkey>");
+      await ctx.reply(
+        "<b>Usage</b>\n/bind_wallet <code>&lt;solana-pubkey&gt;</code>",
+        { parse_mode: "HTML" },
+      );
       return;
     }
     if (!isValidPubkey(arg)) {
-      await ctx.reply(`invalid pubkey: ${arg}`);
+      await ctx.reply(`❌ Invalid pubkey: <code>${escapeHtml(arg)}</code>`, {
+        parse_mode: "HTML",
+      });
       return;
     }
     await setWallet(BigInt(tgId), arg);
-    await ctx.reply(`bound wallet ${arg}`);
+    await ctx.reply(
+      [
+        "✅ <b>Wallet linked</b>",
+        `<code>${arg}</code>`,
+        "",
+        "Next: /status",
+      ].join("\n"),
+      { parse_mode: "HTML" },
+    );
   });
 
   bot.command("status", async (ctx) => {
@@ -192,7 +333,10 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const user = await getOrCreateUser(BigInt(tgId));
     if (!user.walletPubkey) {
-      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
       return;
     }
     const [holdings, snapshot] = await Promise.all([
@@ -201,28 +345,43 @@ export function registerCommands(bot: Bot) {
     ]);
     if (holdings.length === 0) {
       await ctx.reply(
-        `wallet: ${user.walletPubkey}\nno tracked LST holdings (${TRACKED_LSTS.join(", ")})`,
+        [
+          "👛 <b>Wallet</b>",
+          `<code>${user.walletPubkey}</code>`,
+          "",
+          "📭 No tracked LSTs found in this wallet.",
+          `Tracked: ${TRACKED_LSTS.join(", ")}`,
+        ].join("\n"),
+        { parse_mode: "HTML" },
       );
       return;
     }
     const bySym = new Map(snapshot.map((s) => [s.symbol, s]));
-    const lines = [`wallet: ${user.walletPubkey}`, "holdings:"];
+    const lines = [
+      "👛 <b>Wallet</b>",
+      `<code>${user.walletPubkey}</code>`,
+      "",
+      "📊 <b>Holdings</b>",
+    ];
     let totalSol = 0;
     for (const h of holdings) {
       const snap = bySym.get(h.symbol);
       const valueSol = snap?.solPerLst ? h.amount * snap.solPerLst : null;
       const apy =
-        snap?.apy != null ? `${(snap.apy * 100).toFixed(2)}% APY` : "n/a APY";
+        snap?.apy != null ? `${(snap.apy * 100).toFixed(2)}% APY` : "APY n/a";
+      const valueStr = valueSol === null ? "—" : `${valueSol.toFixed(4)} SOL`;
       lines.push(
-        `  ${h.symbol}: ${h.amount.toFixed(4)}  (${valueSol === null ? "?" : valueSol.toFixed(4)} SOL, ${apy})`,
+        `• <b>${h.symbol}</b> — ${h.amount.toFixed(4)}  (≈ ${valueStr} · ${apy})`,
       );
       if (valueSol !== null) totalSol += valueSol;
     }
-    lines.push(`total: ${totalSol.toFixed(4)} SOL`);
+    lines.push("");
+    lines.push(`💰 <b>Total</b> — ${totalSol.toFixed(4)} SOL`);
+    lines.push("");
     lines.push(
-      `payback ≤ ${user.paybackDaysMax}d  source ${user.sourceLst ?? "auto"}`,
+      `⚙️ Payback ≤ ${user.paybackDaysMax}d  ·  Source: ${user.sourceLst ?? "auto"}`,
     );
-    await ctx.reply(lines.join("\n"));
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
   });
 
   bot.command("init_vault", async (ctx) => {
@@ -230,7 +389,10 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const user = await getOrCreateUser(BigInt(tgId));
     if (!user.walletPubkey) {
-      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
       return;
     }
 
@@ -242,7 +404,12 @@ export function registerCommands(bot: Bot) {
       perfFeeBpsMax > 2000
     ) {
       await ctx.reply(
-        "usage: /init_vault [perf_fee_bps_max], range 0..2000 (default 250)",
+        [
+          "<b>Usage</b>",
+          "/init_vault <code>[perf_fee_bps_max]</code>",
+          "Range: 0–2000 bps  ·  Default: 250",
+        ].join("\n"),
+        { parse_mode: "HTML" },
       );
       return;
     }
@@ -254,7 +421,11 @@ export function registerCommands(bot: Bot) {
     ]);
     await replyBase64Tx(
       ctx,
-      `init vault — rotation authority ${rotationAuthority.toBase58()}, max perf fee ${perfFeeBpsMax} bps`,
+      [
+        "🏦 <b>Init vault</b>",
+        `Rotation authority: <code>${rotationAuthority.toBase58()}</code>`,
+        `Max perf fee: ${perfFeeBpsMax} bps`,
+      ].join("\n"),
       b64,
     );
   });
@@ -264,20 +435,32 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const user = await getOrCreateUser(BigInt(tgId));
     if (!user.walletPubkey) {
-      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
       return;
     }
 
     const [symbolRaw, amountRaw] = ctx.match.trim().split(/\s+/);
     const symbol = symbolRaw ? parseLstSymbol(symbolRaw) : null;
     if (!symbol || !amountRaw) {
-      await ctx.reply(`usage: /deposit <${TRACKED_LSTS.join("|")}> <amount>`);
+      await ctx.reply(
+        [
+          "<b>Usage</b>",
+          `/deposit <code>&lt;${TRACKED_LSTS.join("|")}&gt; &lt;amount&gt;</code>`,
+        ].join("\n"),
+        { parse_mode: "HTML" },
+      );
       return;
     }
     const meta = LSTS[symbol];
     const amount = parseUiAmount(amountRaw, meta.decimals);
     if (!amount || amount <= 0n) {
-      await ctx.reply(`invalid amount for ${symbol}: ${amountRaw}`);
+      await ctx.reply(
+        `❌ Invalid amount for <b>${symbol}</b>: <code>${escapeHtml(amountRaw)}</code>`,
+        { parse_mode: "HTML" },
+      );
       return;
     }
 
@@ -297,7 +480,10 @@ export function registerCommands(bot: Bot) {
     ]);
     await replyBase64Tx(
       ctx,
-      `deposit ${amountRaw} ${symbol} into vault ${vault.toBase58()}`,
+      [
+        `⬇️ <b>Deposit</b> ${amountRaw} ${symbol} → vault`,
+        `Vault: <code>${vault.toBase58()}</code>`,
+      ].join("\n"),
       b64,
     );
   });
@@ -307,20 +493,32 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const user = await getOrCreateUser(BigInt(tgId));
     if (!user.walletPubkey) {
-      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
       return;
     }
 
     const [symbolRaw, amountRaw] = ctx.match.trim().split(/\s+/);
     const symbol = symbolRaw ? parseLstSymbol(symbolRaw) : null;
     if (!symbol || !amountRaw) {
-      await ctx.reply(`usage: /withdraw <${TRACKED_LSTS.join("|")}> <amount>`);
+      await ctx.reply(
+        [
+          "<b>Usage</b>",
+          `/withdraw <code>&lt;${TRACKED_LSTS.join("|")}&gt; &lt;amount&gt;</code>`,
+        ].join("\n"),
+        { parse_mode: "HTML" },
+      );
       return;
     }
     const meta = LSTS[symbol];
     const amount = parseUiAmount(amountRaw, meta.decimals);
     if (!amount || amount <= 0n) {
-      await ctx.reply(`invalid amount for ${symbol}: ${amountRaw}`);
+      await ctx.reply(
+        `❌ Invalid amount for <b>${symbol}</b>: <code>${escapeHtml(amountRaw)}</code>`,
+        { parse_mode: "HTML" },
+      );
       return;
     }
 
@@ -340,7 +538,10 @@ export function registerCommands(bot: Bot) {
     ]);
     await replyBase64Tx(
       ctx,
-      `withdraw ${amountRaw} ${symbol} from vault ${vault.toBase58()}`,
+      [
+        `⬆️ <b>Withdraw</b> ${amountRaw} ${symbol} ← vault`,
+        `Vault: <code>${vault.toBase58()}</code>`,
+      ].join("\n"),
       b64,
     );
   });
@@ -350,7 +551,10 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const user = await getOrCreateUser(BigInt(tgId));
     if (!user.walletPubkey) {
-      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
       return;
     }
     const [holdings, snapshot] = await Promise.all([
@@ -359,7 +563,9 @@ export function registerCommands(bot: Bot) {
     ]);
     const picked = pickSource(user, holdings, snapshot);
     if (!picked) {
-      await ctx.reply("no eligible LST holdings to rotate.");
+      await ctx.reply(
+        "No eligible LSTs to rotate.\nUse /deposit to fund your vault first.",
+      );
       return;
     }
     const rows = await rankRotations({
@@ -369,16 +575,29 @@ export function registerCommands(bot: Bot) {
       paybackDaysMax: user.paybackDaysMax,
     });
     if (rows.length === 0) {
-      await ctx.reply("no rotation candidates available.");
+      await ctx.reply("No rotation candidates available right now.");
       return;
     }
     const top = rows.slice(0, 3);
-    const header = `source ${picked.holding.symbol} (${picked.sourceBalanceSol.toFixed(4)} SOL)  payback ≤ ${user.paybackDaysMax}d`;
+    const header = [
+      `🔄 <b>Source</b> ${picked.holding.symbol} — ${picked.sourceBalanceSol.toFixed(4)} SOL`,
+      `Payback ≤ ${user.paybackDaysMax}d`,
+      "",
+      "<b>Candidates</b>",
+    ].join("\n");
     const recommended = rows.find((r) => r.recommended);
     const tail = recommended
-      ? `\nrecommend: rotate ${picked.holding.symbol} → ${recommended.dest}  payback ${recommended.paybackDays.toFixed(1)}d  +${recommended.apyUpliftPp.toFixed(2)}pp\nrun /rotate to build the tx.`
-      : "\nno candidate meets payback threshold — hold.";
-    await ctx.reply([header, ...top.map(fmtRotation), tail].join("\n"));
+      ? [
+          "",
+          `✅ <b>Recommended</b> — rotate ${picked.holding.symbol} → ${recommended.dest}`,
+          `Payback: ${recommended.paybackDays.toFixed(1)}d  ·  Uplift: +${recommended.apyUpliftPp.toFixed(2)}pp`,
+          "",
+          "Run /rotate to build the tx.",
+        ].join("\n")
+      : "\nNo candidate meets your payback threshold — hold for now.";
+    await ctx.reply([header, ...top.map(fmtRotation), tail].join("\n"), {
+      parse_mode: "HTML",
+    });
   });
 
   // Phase 4.3 — kill-switch. Builds an unsigned revoke_authority tx; user signs it
@@ -388,7 +607,10 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const user = await getOrCreateUser(BigInt(tgId));
     if (!user.walletPubkey) {
-      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
       return;
     }
     const owner = new PublicKey(user.walletPubkey);
@@ -401,15 +623,13 @@ export function registerCommands(bot: Bot) {
     const b64 = tx
       .serialize({ requireAllSignatures: false })
       .toString("base64");
-    await ctx.reply(
+    await replyBase64Tx(
+      ctx,
       [
-        "kill-switch — revokes the bot's rotation authority on your vault.",
-        "sign this base64 tx in your wallet:",
-        "```",
-        b64,
-        "```",
+        "🛑 <b>Kill-switch</b>",
+        "This revokes the bot's rotation authority on your vault.",
       ].join("\n"),
-      { parse_mode: "Markdown" },
+      b64,
     );
   });
 
@@ -418,7 +638,10 @@ export function registerCommands(bot: Bot) {
     if (!tgId) return;
     const user = await getOrCreateUser(BigInt(tgId));
     if (!user.walletPubkey) {
-      await ctx.reply("no wallet bound. use /bind_wallet <pubkey>.");
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
       return;
     }
     const [holdings, snapshot] = await Promise.all([
@@ -427,7 +650,9 @@ export function registerCommands(bot: Bot) {
     ]);
     const picked = pickSource(user, holdings, snapshot);
     if (!picked) {
-      await ctx.reply("no eligible LST holdings to rotate.");
+      await ctx.reply(
+        "No eligible LSTs to rotate.\nUse /deposit to fund your vault first.",
+      );
       return;
     }
     const rows = await rankRotations({
@@ -438,7 +663,9 @@ export function registerCommands(bot: Bot) {
     });
     const top = rows.find((r) => r.recommended);
     if (!top) {
-      await ctx.reply("no rotation meets payback threshold — hold.");
+      await ctx.reply(
+        "No rotation meets your payback threshold — hold for now.",
+      );
       return;
     }
     let tx;
@@ -450,7 +677,10 @@ export function registerCommands(bot: Bot) {
         user.walletPubkey,
       );
     } catch (err) {
-      await ctx.reply(`failed to build swap tx: ${(err as Error).message}`);
+      await ctx.reply(
+        `❌ Failed to build swap tx: ${escapeHtml((err as Error).message)}`,
+        { parse_mode: "HTML" },
+      );
       return;
     }
 
@@ -469,25 +699,22 @@ export function registerCommands(bot: Bot) {
       const actionUrl = `solana-action:${host.replace(/\/$/, "")}/api/actions/rotate/${id}`;
       await ctx.reply(
         [
-          `rotate ${picked.holding.symbol} → ${top.dest}  +${top.apyUpliftPp.toFixed(2)}pp`,
-          `payback ${top.paybackDays.toFixed(1)}d`,
+          `🔄 <b>Rotate</b> ${picked.holding.symbol} → ${top.dest}  +${top.apyUpliftPp.toFixed(2)}pp`,
+          `Payback: ${top.paybackDays.toFixed(1)}d`,
           "",
-          "open in your wallet:",
+          "Open in your wallet:",
           actionUrl,
         ].join("\n"),
+        { parse_mode: "HTML" },
       );
     } else {
-      await ctx.reply(
+      await replyBase64Tx(
+        ctx,
         [
-          `rotate ${picked.holding.symbol} → ${top.dest}  +${top.apyUpliftPp.toFixed(2)}pp`,
-          `payback ${top.paybackDays.toFixed(1)}d`,
-          "",
-          "BOT_PUBLIC_HOST not set — sign the base64 tx below in your wallet:",
-          "```",
-          tx.swapTransactionBase64,
-          "```",
+          `🔄 <b>Rotate</b> ${picked.holding.symbol} → ${top.dest}  +${top.apyUpliftPp.toFixed(2)}pp`,
+          `Payback: ${top.paybackDays.toFixed(1)}d`,
         ].join("\n"),
-        { parse_mode: "Markdown" },
+        tx.swapTransactionBase64,
       );
     }
   });
