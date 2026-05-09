@@ -1,5 +1,6 @@
 import type { LstSymbol } from "./lsts.ts";
 import { env } from "./env.ts";
+import { fetchDefiLlamaApys } from "./defillama.ts";
 
 interface ApyResponse {
   apys: Partial<Record<string, number>>;
@@ -59,9 +60,18 @@ export async function fetchSnapshot(
   symbols: readonly LstSymbol[],
 ): Promise<LstSnapshot[]> {
   const [apys, solValues] = await Promise.all([
-    fetchApys(symbols),
+    fetchApys(symbols).catch(() => new Map<LstSymbol, number>()),
     fetchSolValues(symbols),
   ]);
+
+  const missing = symbols.filter((s) => !apys.has(s));
+  if (missing.length > 0) {
+    const fallback = await fetchDefiLlamaApys(missing).catch(
+      () => new Map<LstSymbol, number>(),
+    );
+    for (const [s, v] of fallback) apys.set(s, v);
+  }
+
   return symbols.map((s) => {
     const raw = solValues.get(s);
     const solPerLst = raw === undefined ? null : Number(raw) / 1e9;

@@ -120,7 +120,7 @@ function pickSource(
 
   const eligible = holdings.filter((h) => {
     const snap = bySymbol.get(h.symbol);
-    return snap && snap.solPerLst !== null && snap.apy !== null;
+    return snap && snap.solPerLst !== null;
   });
   if (eligible.length === 0) return null;
 
@@ -222,6 +222,19 @@ export function registerCommands(bot: Bot) {
     if (!picked) {
       lines.push("");
       lines.push("👛 No eligible LST to advise on right now.");
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      return;
+    }
+
+    const pickedSnap = snapshot.find((s) => s.symbol === picked.holding.symbol);
+    if (!pickedSnap || pickedSnap.apy === null) {
+      lines.push("");
+      lines.push(
+        `👛 Holding <b>${picked.holding.amount.toFixed(4)} ${picked.holding.symbol}</b> (≈ ${picked.sourceBalanceSol.toFixed(4)} SOL)`,
+      );
+      lines.push(
+        "⏳ Yield data syncing from upstream — advice paused. Try again shortly.",
+      );
       await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
       return;
     }
