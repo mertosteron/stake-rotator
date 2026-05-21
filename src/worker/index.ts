@@ -24,6 +24,7 @@ import { LSTS, TRACKED_LSTS, type LstSymbol } from "../lsts.ts";
 import { fetchSnapshot, type LstSnapshot } from "../sanctum.ts";
 import { rankRotations } from "../calc.ts";
 import { fetchLstHoldings } from "../balances.ts";
+import { captureApySnapshot } from "../earnings_tracker.ts";
 import {
   deriveVault,
   ixExecuteRotation,
@@ -332,6 +333,9 @@ async function tick(conn: Connection, bot: Keypair) {
     .from(users)
     .where(isNotNull(users.walletPubkey));
   const snapshot = await fetchSnapshot(TRACKED_LSTS);
+  await captureApySnapshot(snapshot).catch((e) =>
+    console.error("apy snapshot error:", e),
+  );
   console.log(`tick: ${optIns.length} users`);
   for (const u of optIns) {
     try {

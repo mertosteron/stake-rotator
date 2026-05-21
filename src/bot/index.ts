@@ -44,6 +44,10 @@ async function main() {
     { command: "recommend", description: "show best rotation candidate" },
     { command: "rotate", description: "build the rotation transaction" },
     {
+      command: "earnings",
+      description: "USD PnL and alternative-LST comparison",
+    },
+    {
       command: "revoke",
       description: "kill-switch: revoke bot rotation authority",
     },

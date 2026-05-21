@@ -21,6 +21,18 @@ import { users, type User } from "../db/schema.ts";
 import { env } from "../env.ts";
 import { registerRotation } from "../actions/server.ts";
 import {
+  buildRotationDeeplink,
+  buildRotationKeyboard,
+  trackPendingRotation,
+} from "../phantom_deeplink.ts";
+import {
+  captureCurrentPositions,
+  computeEarningsReport,
+  formatEarningsReport,
+  logRotationEvent,
+} from "../earnings_tracker.ts";
+import { fetchPriceSnapshot } from "../prices.ts";
+import {
   deriveVault,
   ixDepositLst,
   ixInitVault,
@@ -305,7 +317,8 @@ export function registerCommands(bot: Bot) {
         "• /deposit — fund the vault",
         "• /withdraw — pull funds out",
         "• /recommend — best rotation candidate",
-        "• /rotate — build the rotation tx",
+        "• /rotate — build the rotation tx (mobile one-tap sign)",
+        "• /earnings — USD PnL + alternative-LST comparison",
         "• /revoke — kill-switch (revoke bot authority)",
       ].join("\n"),
       { parse_mode: "HTML" },
@@ -709,16 +722,70 @@ export function registerCommands(bot: Bot) {
         swapTransactionBase64: tx.swapTransactionBase64,
         apyUpliftPp: top.apyUpliftPp,
       });
-      const actionUrl = `solana-action:${host.replace(/\/$/, "")}/api/actions/rotate/${id}`;
+
+      const deeplink = buildRotationDeeplink({ host, rotationId: id });
+      const keyboard = buildRotationKeyboard({
+        blinkUrl: deeplink.blinkUrl,
+        source: picked.holding.symbol,
+        dest: top.dest as LstSymbol,
+      });
+
+      const chatId = ctx.chat?.id;
+      const sourceSym = picked.holding.symbol;
+      const destSym = top.dest as LstSymbol;
+      if (chatId != null) {
+        trackPendingRotation({
+          rotationId: id,
+          chatId,
+          source: sourceSym,
+          dest: destSym,
+          onTimeout: async () => {
+            try {
+              await ctx.api.sendMessage(
+                chatId,
+                `⏰ <b>Rotation timed out</b>  ${sourceSym} → ${destSym}\nRun /rotate again to retry.`,
+                { parse_mode: "HTML" },
+              );
+            } catch (err) {
+              console.error("failed to send timeout msg:", err);
+            }
+          },
+        });
+      }
+
+      // Log a rotation event up front. We don't know yet whether the user will
+      // actually sign — but the alternative (firing on an Actions POST webhook)
+      // would require server-side polling of tx finality. This is a reasonable
+      // approximation; users can clear stale events from the DB if needed.
+      try {
+        const solPerLstMap = new Map(
+          snapshot.map((s) => [s.symbol, s.solPerLst] as const),
+        );
+        const prices = await fetchPriceSnapshot([sourceSym], solPerLstMap);
+        const usdPerLst = prices.usdPerLst.get(sourceSym);
+        if (usdPerLst != null) {
+          await logRotationEvent({
+            telegramId: BigInt(tgId),
+            fromLst: sourceSym,
+            toLst: destSym,
+            amountLstIn: picked.holding.amount,
+            usdValueAtEvent: picked.holding.amount * usdPerLst,
+            apyUpliftPp: top.apyUpliftPp,
+          });
+        }
+      } catch (err) {
+        console.error("failed to log rotation event:", err);
+      }
+
       await ctx.reply(
         [
           `🔄 <b>Rotate</b> ${picked.holding.symbol} → ${top.dest}  +${top.apyUpliftPp.toFixed(2)}pp`,
           `Payback: ${top.paybackDays.toFixed(1)}d`,
           "",
-          "Open in your wallet:",
-          actionUrl,
+          "Tap the button below to sign on your phone (Phantom, Solflare, Backpack):",
+          `<i>Link expires in 90s · valid until ${deeplink.expiresAt.toISOString().slice(11, 19)} UTC</i>`,
         ].join("\n"),
-        { parse_mode: "HTML" },
+        { parse_mode: "HTML", reply_markup: keyboard },
       );
     } else {
       await replyBase64Tx(
@@ -726,8 +793,48 @@ export function registerCommands(bot: Bot) {
         [
           `🔄 <b>Rotate</b> ${picked.holding.symbol} → ${top.dest}  +${top.apyUpliftPp.toFixed(2)}pp`,
           `Payback: ${top.paybackDays.toFixed(1)}d`,
+          "",
+          "<i>BOT_PUBLIC_HOST not configured — mobile deeplink unavailable.</i>",
         ].join("\n"),
         tx.swapTransactionBase64,
+      );
+    }
+  });
+
+  bot.command("earnings", async (ctx) => {
+    const tgId = ctx.from?.id;
+    if (!tgId) return;
+    const user = await getOrCreateUser(BigInt(tgId));
+    if (!user.walletPubkey) {
+      await ctx.reply(
+        "No wallet linked yet.\nUse /bind_wallet <code>&lt;pubkey&gt;</code>.",
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+
+    try {
+      let report = await computeEarningsReport({
+        telegramId: BigInt(tgId),
+        walletPubkey: user.walletPubkey,
+      });
+      // First call ever for this user: capture the initial snapshot now so the
+      // next invocation has a baseline to compare against.
+      if (!report.hasHistory && report.initialUsd === 0) {
+        await captureCurrentPositions({
+          telegramId: BigInt(tgId),
+          walletPubkey: user.walletPubkey,
+        });
+        report = await computeEarningsReport({
+          telegramId: BigInt(tgId),
+          walletPubkey: user.walletPubkey,
+        });
+      }
+      await ctx.reply(formatEarningsReport(report), { parse_mode: "HTML" });
+    } catch (err) {
+      await ctx.reply(
+        `❌ Failed to compute earnings: ${escapeHtml((err as Error).message)}`,
+        { parse_mode: "HTML" },
       );
     }
   });

@@ -1,0 +1,426 @@
+{
+  "id": "1847ee67-a7f2-4604-b40c-cdad5c14ff10",
+  "prevId": "14e7aa6f-a40c-4fa4-8fad-7cfb14cbd27c",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.apy_snapshots": {
+      "name": "apy_snapshots",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "apy_snapshots_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "lst_symbol": {
+          "name": "lst_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "apy": {
+          "name": "apy",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "captured_at": {
+          "name": "captured_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "apy_snapshots_lst_time_idx": {
+          "name": "apy_snapshots_lst_time_idx",
+          "columns": [
+            {
+              "expression": "lst_symbol",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "captured_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.pending_rotations": {
+      "name": "pending_rotations",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "telegram_id": {
+          "name": "telegram_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "wallet_pubkey": {
+          "name": "wallet_pubkey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dest": {
+          "name": "dest",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "swap_transaction_base64": {
+          "name": "swap_transaction_base64",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "apy_uplift_pp": {
+          "name": "apy_uplift_pp",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.position_snapshots": {
+      "name": "position_snapshots",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "position_snapshots_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "telegram_id": {
+          "name": "telegram_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lst_symbol": {
+          "name": "lst_symbol",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount_lst": {
+          "name": "amount_lst",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount_base_units": {
+          "name": "amount_base_units",
+          "type": "numeric(39, 0)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sol_per_lst": {
+          "name": "sol_per_lst",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "usd_per_sol": {
+          "name": "usd_per_sol",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "usd_value": {
+          "name": "usd_value",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "captured_at": {
+          "name": "captured_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "position_snapshots_user_lst_idx": {
+          "name": "position_snapshots_user_lst_idx",
+          "columns": [
+            {
+              "expression": "telegram_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "lst_symbol",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "captured_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.rotation_events": {
+      "name": "rotation_events",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "rotation_events_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "telegram_id": {
+          "name": "telegram_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "from_lst": {
+          "name": "from_lst",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "to_lst": {
+          "name": "to_lst",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "amount_lst_in": {
+          "name": "amount_lst_in",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "usd_value_at_event": {
+          "name": "usd_value_at_event",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "apy_uplift_pp": {
+          "name": "apy_uplift_pp",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "rotation_events_user_idx": {
+          "name": "rotation_events_user_idx",
+          "columns": [
+            {
+              "expression": "telegram_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.users": {
+      "name": "users",
+      "schema": "",
+      "columns": {
+        "telegram_id": {
+          "name": "telegram_id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "wallet_pubkey": {
+          "name": "wallet_pubkey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_lst": {
+          "name": "source_lst",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "payback_days_max": {
+          "name": "payback_days_max",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 30
+        },
+        "alerts_enabled": {
+          "name": "alerts_enabled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "min_uplift_pp": {
+          "name": "min_uplift_pp",
+          "type": "numeric(6, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0.25'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}
