@@ -1,9 +1,10 @@
 import { InlineKeyboard } from "grammy";
 import type { LstSymbol } from "./lsts.ts";
 
-// dial.to renders any Solana Action URL as a Blink (one-tap mobile signing).
+// dialect.to renders any Solana Action URL as a Blink (one-tap mobile signing).
 // Phantom mobile, Solflare, Backpack, and Jupiter Mobile all render Blinks.
-const BLINK_RENDERER = "https://dial.to/";
+// (dial.to subdomain was paused on Vercel; the apex dialect.to is the live host.)
+const BLINK_RENDERER = "https://dialect.to/";
 
 // User-supplied 90s timeout for pending rotations. This matches the TTL_MS in
 // actions/server.ts so the deeplink and the pendingRotations row expire together.
